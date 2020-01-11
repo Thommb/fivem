@@ -24,7 +24,7 @@
 #define DEBUG_WAS_SET
 #endif
 
-#include <concurrent_unordered_map.h>
+#include <tbb/concurrent_unordered_map.h>
 #include <unordered_set>
 
 #ifdef DEBUG_WAS_SET
@@ -160,7 +160,7 @@ static hook::thiscall_stub<rage::fiCollection*(rage::fiCollection*)> packfileCto
 #define GET_HANDLE(x) ((x) & 0x7FFFFFFF)
 #define UNDEF_ASSERT() FatalError("Undefined function " __FUNCTION__)
 
-static atArray<StreamingPackfileEntry>* g_streamingPackfiles;
+atArray<StreamingPackfileEntry>* g_streamingPackfiles;
 
 struct IgnoreCaseLess
 {
@@ -206,11 +206,13 @@ private:
 
 	char m_childPackfile[192];
 
+	char m_childPackfile_const[192];
+
 	rage::fiCollection* m_parentCollection;
 
-	concurrency::concurrent_unordered_map<uint16_t, CollectionEntry> m_entries;
+	tbb::concurrent_unordered_map<uint16_t, CollectionEntry> m_entries;
 
-	concurrency::concurrent_unordered_map<std::string, uint16_t> m_reverseEntries;
+	tbb::concurrent_unordered_map<std::string, uint16_t> m_reverseEntries;
 
 	HandleEntry m_handles[512];
 
@@ -247,25 +249,38 @@ private:
 		rage::fiCollection* m_child;
 		CfxCollection* m_collection;
 
-		bool m_oldVal;
+		std::unique_lock<std::recursive_mutex> m_lock;
+
+		bool m_constant;
 
 	public:
-		PseudoCallContext(CfxCollection* collection)
-			: m_collection(collection)
+		PseudoCallContext(CfxCollection* collection, bool isConstant = false)
+			: m_collection(collection), m_constant(isConstant)
 		{
-			m_collection->m_mutex.lock();
+			if (!isConstant)
+			{
+				m_lock = std::move(std::unique_lock<std::recursive_mutex>{ m_collection->m_mutex });
 
-			memcpy(collection->m_childPackfile, collection, sizeof(collection->m_childPackfile));
-			*(uintptr_t*)collection->m_childPackfile = g_vTable_fiPackfile;
+				memcpy(collection->m_childPackfile, collection, sizeof(collection->m_childPackfile));
+				*(uintptr_t*)collection->m_childPackfile = g_vTable_fiPackfile;
 
-			m_child = reinterpret_cast<rage::fiCollection*>(collection->m_childPackfile);
+				m_child = reinterpret_cast<rage::fiCollection*>(collection->m_childPackfile);
+			}
+			else
+			{
+				*(uintptr_t*)collection->m_childPackfile_const = g_vTable_fiPackfile;
+				memcpy(&collection->m_childPackfile_const[8], reinterpret_cast<char*>(m_collection) + 8, sizeof(collection->m_childPackfile) - 8);
+
+				m_child = reinterpret_cast<rage::fiCollection*>(collection->m_childPackfile_const);
+			}
 		}
 
 		~PseudoCallContext()
 		{
-			memcpy(reinterpret_cast<char*>(m_collection) + 8, &m_collection->m_childPackfile[8], sizeof(m_collection->m_childPackfile) - 8);
-
-			m_collection->m_mutex.unlock();
+			if (!m_constant)
+			{
+				memcpy(reinterpret_cast<char*>(m_collection) + 8, &m_collection->m_childPackfile[8], sizeof(m_collection->m_childPackfile) - 8);
+			}
 		}
 
 		rage::fiCollection* operator->() const
@@ -403,7 +418,12 @@ public:
 
 		m_reverseEntries[name] = idx;
 
-		return m_entries.insert({ idx, newEntry }).first;
+		m_entries[idx] = newEntry;
+
+		auto it = m_entries.find(idx);
+		assert(it != m_entries.end());
+
+		return it;
 	}
 
 	auto AddEntry(uint16_t idx, const FileEntry* entry)
@@ -413,7 +433,12 @@ public:
 		newEntry.valid = true;
 		memcpy(&newEntry.baseEntry, entry, sizeof(FileEntry));
 
-		return m_entries.insert({ idx, newEntry }).first;
+		m_entries[idx] = newEntry;
+
+		auto it = m_entries.find(idx);
+		assert(it != m_entries.end());
+
+		return it;
 	}
 
 	CollectionEntry* GetCfxEntry(uint16_t index)
@@ -449,7 +474,7 @@ public:
 
 		if (it == m_entries.end() || !it->second.valid)
 		{
-			m_entries.unsafe_erase(index);
+			//m_entries.unsafe_erase(index);
 
 			char entryName[256] = { 0x1E };
 			PseudoCallContext(this)->GetEntryNameToBuffer(index, entryName, sizeof(entryName));
@@ -477,7 +502,8 @@ public:
 				{
 					auto n = std::get<std::string>(rit->second);
 					m_resourceFlags[n] = std::get<rage::ResourceFlags>(rit->second);
-					m_reverseEntries.unsafe_erase(entryName);
+					//m_reverseEntries.unsafe_erase(entryName);
+					m_reverseEntries[entryName] = -1;
 
 					// ignore streaming entries insert was here
 
@@ -631,7 +657,7 @@ public:
 	{
 		auto it = m_reverseEntries.find(name);
 
-		if (it == m_reverseEntries.end())
+		if (it == m_reverseEntries.end() || it->second == -1)
 		{
 			uint16_t index = PseudoCallContext(this)->GetEntryByName(name);
 
@@ -731,7 +757,7 @@ public:
 
 private:
 	template<typename TFunc>
-	auto InvokeOnHandle(uint64_t handle, const TFunc& func)
+	auto InvokeOnHandle(uint64_t handle, const TFunc& func, bool isConstant = false)
 	{
 		// return an appropriate -1 error value if the handle is -1
 		if (handle == -1)
@@ -745,7 +771,7 @@ private:
 		if (handleItem.parentDevice == this)
 		{
 			{
-				PseudoCallContext ctx(this);
+				PseudoCallContext ctx(this, isConstant);
 				return func(ctx.GetPointer(), handleItem.parentHandle);
 			}
 		}
@@ -769,7 +795,7 @@ public:
 		uint32_t size = InvokeOnHandle(handle, [&] (rage::fiDevice* device, uint64_t handle)
 		{
 			return device->ReadBulk(handle, ptr, buffer, toRead);
-		});
+		}, true);
 
 		if (size != toRead)
 		{
@@ -782,8 +808,6 @@ public:
 		}
 
 		return size;
-
-		//return PseudoCallContext(this)->ReadBulk(handle, ptr, buffer, toRead);
 	}
 
 	virtual uint32_t WriteBulk(uint64_t, int, int, int, int)
@@ -1078,7 +1102,7 @@ private:
 			const char* colon = strchr(archive, ':');
 
 			// temporary: make citizen/ path manually
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
+			static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
 			basePath << converter.to_bytes(MakeRelativeCitPath(L"/"));
 
 			basePath << std::string(archive, colon);
@@ -1090,7 +1114,7 @@ private:
 			const char* colon = strchr(archive, ':');
 
 			// temporary: make citizen/ path manually
-			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
+			static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
 			basePath << converter.to_bytes(MakeRelativeCitPath(L"citizen/"));
 
 			basePath << std::string(archive, colon);
@@ -2037,6 +2061,7 @@ static std::unordered_set<std::string, IgnoreCaseHash, IgnoreCaseEqualTo> g_regi
 static std::map<uint32_t, std::string> g_hashes;
 
 std::string g_lastStreamingName;
+extern fwEvent<> OnReloadMapStore;
 
 static const char* RegisterStreamingFileStrchrWrap(const char* str, const int ch)
 {
@@ -2222,6 +2247,12 @@ static HookFunction hookFunction([] ()
 			((CfxCollection*)collection)->Invalidate();
 		}
 	}, -500);
+
+	// will rescan dlc collisions, if a dlc collision is overriden it breaks(?)
+	OnReloadMapStore.Connect([]()
+	{
+		g_registeredFileSet.clear();
+	});
 
 	{
 		void* location = hook::pattern("41 B0 01 BA 1B E6 DA 93 E8").count(1).get(0).get<void>(-12);

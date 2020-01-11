@@ -79,7 +79,21 @@ static float getFloatField(char* handlingChar, uint32_t offset, const char* fiel
 {
 	auto hash = HashRageString(fieldName);
 
-	if (hash == HashRageString("fDriveBiasFront") || hash == HashRageString("fBrakeBiasFront") || hash == HashRageString("fSuspensionBiasFront") ||
+	if (hash == HashRageString("fDriveBiasFront"))
+	{
+		float fDriveBiasFront = *(float*)(handlingChar + offset);
+		float fDriveBiasRear = *(float*)(handlingChar + offset + 4);
+		
+		if ((fDriveBiasFront == 1.0f && fDriveBiasRear == 0.0f) || (fDriveBiasFront == 0.0f && fDriveBiasRear == 1.0f))
+		{
+			return fDriveBiasFront;
+		}
+		else
+		{
+			return fDriveBiasFront / 2.0f;
+		}
+	}
+	else if (hash == HashRageString("fBrakeBiasFront") || hash == HashRageString("fSuspensionBiasFront") ||
 		hash == HashRageString("fTractionBiasFront") || hash == HashRageString("fAntiRollBarBiasFront"))
 	{
 		return *(float*)(handlingChar + offset) / 2.0f;
@@ -147,7 +161,7 @@ static void setFloatField(char* handlingChar, uint32_t offset, float value, cons
 			*(float*)(handlingChar + offset) = 0.0f;
 			*(float*)(handlingChar + offset + 4) = 1.0f; // rear
 		}
-		else if (value >= 0.9f)
+		else if (value > 0.9f)
 		{
 			*(float*)(handlingChar + offset) = 1.0f;
 			*(float*)(handlingChar + offset + 4) = 0.0f; // rear
@@ -526,7 +540,9 @@ static HookFunction hookFunction([] ()
 	// 1103 now
 	// 1290 now
 	// also 1365
-	auto pMatch = hook::pattern("48 89 96 ? 08 00 00").count(1).get(0);
+	// and 1493
+	// 1604 changed 08 to 09
+	auto pMatch = hook::pattern("48 89 96 ? 09 00 00").count(1).get(0);
 
 	char* location = pMatch.get<char>(-11);
 	g_handlingData = (atArray<CHandlingData*>*)(location + *(int32_t*)location + 4);

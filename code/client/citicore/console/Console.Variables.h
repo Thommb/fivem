@@ -3,6 +3,8 @@
 #include "Console.CommandHelpers.h"
 #include "Console.Commands.h"
 
+#include <se/Security.h>
+
 namespace internal
 {
 class ConsoleVariableEntryBase
@@ -50,6 +52,7 @@ enum ConsoleVariableFlags
 	ConVar_Archive    = 0x1,
 	ConVar_Modified   = 0x2,
 	ConVar_ServerInfo = 0x4,
+	ConVar_Replicated = 0x8,
 };
 
 class ConsoleVariableManager
@@ -78,7 +81,11 @@ public:
 
 	virtual void RemoveEntryFlags(const std::string& name, int flags);
 
+	virtual int GetEntryFlags(const std::string& name);
+
 	virtual void ForAllVariables(const TVariableCB& callback, int flagMask = 0xFFFFFFFF);
+
+	virtual void RemoveVariablesWithFlag(int flags);
 
 	virtual void SaveConfiguration(const TWriteLineCB& writeLineFunction);
 
@@ -116,15 +123,21 @@ private:
 	std::unique_ptr<ConsoleCommand> m_setCommand;
 	std::unique_ptr<ConsoleCommand> m_setaCommand;
 	std::unique_ptr<ConsoleCommand> m_setsCommand;
+	std::unique_ptr<ConsoleCommand> m_setrCommand;
 
 	std::unique_ptr<ConsoleCommand> m_toggleCommand;
+	std::unique_ptr<ConsoleCommand> m_toggleCommand2;
 	std::unique_ptr<ConsoleCommand> m_vstrCommand;
+	std::unique_ptr<ConsoleCommand> m_vstrHoldCommand;
+	std::unique_ptr<ConsoleCommand> m_vstrReleaseCommand;
 
 public:
 	inline static ConsoleVariableManager* GetDefaultInstance()
 	{
 		return Instance<ConsoleVariableManager>::Get();
 	}
+
+	fwEvent<const std::string&> OnConvarModified;
 };
 
 namespace internal
@@ -132,6 +145,7 @@ namespace internal
 inline void MarkConsoleVarModified(ConsoleVariableManager* manager, const std::string& name)
 {
 	manager->AddEntryFlags(name, ConVar_Modified);
+	manager->OnConvarModified(name);
 }
 
 template <typename T>
@@ -208,18 +222,33 @@ public:
 			return false;
 		}
 
-		// update modified flags if changed
-		if (!typename ConsoleArgumentTraits<T>::Equal()(m_curValue, newValue))
+#ifndef IS_FXSERVER
+		if (m_manager->GetEntryFlags(m_name) & ConVar_Replicated)
 		{
-			// indirection as manager isn't declared by now
-			MarkConsoleVarModified(m_manager, m_name);
+			if (!seCheckPrivilege("builtin.setReplicated"))
+			{
+				console::Printf("cmd", "Cannot set server-replicated ConVar %s from client console.\n", m_name);
+				return false;
+			}
 		}
+#endif
 
+		// keep the old value for comparison
+		auto oldValue = m_curValue;
+
+		// set the new value
 		m_curValue = newValue;
 
 		if (m_trackingVar)
 		{
 			*m_trackingVar = m_curValue;
+		}
+
+		// update modified flags and trigger change events
+		if (!typename ConsoleArgumentTraits<T>::Equal()(oldValue, m_curValue))
+		{
+			// indirection as manager isn't declared by now
+			MarkConsoleVarModified(m_manager, m_name);
 		}
 
 		return true;

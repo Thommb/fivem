@@ -105,6 +105,25 @@ public:
 };
 }
 
+class NativeContextRaw :
+	public rage::scrNativeCallContext
+{
+public:
+	inline NativeContextRaw(void* buffer, int argumentCount)
+	{
+		m_pArgs = buffer;
+		m_pReturn = buffer;
+
+		m_nArgCount = argumentCount;
+		m_nDataCount = 0;
+	}
+
+	inline void SetArgumentCount(int argumentCount)
+	{
+		m_nArgCount = argumentCount;
+	}
+};
+
 class NativeContext :
 	public rage::scrNativeCallContext
 {

@@ -1,2 +1,2 @@
-filter 'system:not windows'
-	linkoptions '/usr/lib/libcurl.so'
+-- MSVC for GLM
+defines { "_ENABLE_EXTENDED_ALIGNED_STORAGE" }

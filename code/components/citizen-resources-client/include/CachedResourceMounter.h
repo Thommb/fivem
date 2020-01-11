@@ -12,7 +12,7 @@
 
 #include <VFSDevice.h>
 
-#include <network/uri.hpp>
+#include <skyr/url.hpp>
 
 #ifdef COMPILING_CITIZEN_RESOURCES_CLIENT
 #define RESCLIENT_EXPORT DLL_EXPORT
@@ -58,7 +58,7 @@ namespace fx
 		};
 
 	protected:
-		virtual fwRefContainer<fx::Resource> InitializeLoad(const std::string& uri, network::uri* parsedUri);
+		virtual fwRefContainer<fx::Resource> InitializeLoad(const std::string& uri, skyr::url* parsedUri);
 
 		virtual fwRefContainer<vfs::Device> OpenResourcePackfile(const fwRefContainer<fx::Resource>& resource);
 
@@ -89,5 +89,7 @@ namespace fx
 
 	extern RESCLIENT_EXPORT fwEvent<const StreamingEntryData&> OnAddStreamingResource;
 
-	extern fwEvent<const std::string&, size_t, size_t> OnCacheDownloadStatus;
+	extern RESCLIENT_EXPORT fwEvent<> OnLockStreaming;
+
+	extern RESCLIENT_EXPORT fwEvent<> OnUnlockStreaming;
 }

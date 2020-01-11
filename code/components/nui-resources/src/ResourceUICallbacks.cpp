@@ -17,157 +17,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 
-#include <msgpack.hpp>
+#include <MsgpackJson.h>
 
 // TODO: replace this file with something using ResourceCallbackComponent
-
-void ConvertToMsgPack(const rapidjson::Value& json, msgpack::object& object, msgpack::zone& zone)
-{
-	switch (json.GetType())
-	{
-		case rapidjson::kFalseType:
-			object = false;
-			break;
-
-		case rapidjson::kTrueType:
-			object = true;
-			break;
-
-		case rapidjson::kNumberType:
-		{
-			if (json.IsInt())
-			{
-				object = json.GetInt();
-			}
-			else if (json.IsUint())
-			{
-				object = json.GetUint();
-			}
-			else if (json.IsInt64())
-			{
-				object = json.GetInt64();
-			}
-			else if (json.IsUint64())
-			{
-				object = json.GetUint64();
-			}
-			else if (json.IsDouble())
-			{
-				object = json.GetDouble();
-			}
-
-			break;
-		}
-
-		case rapidjson::kStringType:
-			// we allocate with 'zone', otherwise the std::string's raw pointer gets used, which won't work as it gets destructed later on
-			object = msgpack::object(std::string(json.GetString(), json.GetStringLength()), zone);
-			break;
-
-		case rapidjson::kObjectType:
-		{
-			std::map<std::string, msgpack::object> list;
-
-			for (auto it = json.MemberBegin(); it != json.MemberEnd(); it++)
-			{
-				msgpack::object newObject;
-				ConvertToMsgPack(it->value, newObject, zone);
-
-				list.insert({ it->name.GetString(), newObject });
-			}
-
-			object = msgpack::object(list, zone);
-
-			break;
-		}
-
-		case rapidjson::kArrayType:
-		{
-			std::vector<msgpack::object> list;
-
-			for (auto it = json.Begin(); it != json.End(); it++)
-			{
-				msgpack::object newObject;
-				ConvertToMsgPack(*it, newObject, zone);
-
-				list.push_back(newObject);
-			}
-
-			object = msgpack::object(list, zone);
-
-			break;
-		}
-
-		default:
-			object = msgpack::type::nil();
-			break;
-	}
-}
-
-void ConvertToJSON(const msgpack::object& object, rapidjson::Value& value, rapidjson::MemoryPoolAllocator<>& allocator)
-{
-	switch (object.type)
-	{
-		case msgpack::type::BOOLEAN:
-			value.SetBool(object.as<bool>());
-			break;
-
-		case msgpack::type::POSITIVE_INTEGER:
-		case msgpack::type::NEGATIVE_INTEGER:
-			value.SetInt(object.as<int>());
-			break;
-
-		case msgpack::type::FLOAT:
-			value.SetDouble(object.as<double>());
-			break;
-
-		case msgpack::type::STR:
-		{
-			std::string string = object.as<std::string>();
-			value.SetString(string.c_str(), string.size(), allocator);
-			break;
-		}
-
-		case msgpack::type::ARRAY:
-		{
-			auto list = object.as<std::vector<msgpack::object>>();
-			value.SetArray();
-
-			for (auto& entry : list)
-			{
-				rapidjson::Value inValue;
-				ConvertToJSON(entry, inValue, allocator);
-
-				value.PushBack(inValue, allocator);
-			}
-
-			break;
-		}
-
-		case msgpack::type::MAP:
-		{
-			auto list = object.as<std::map<std::string, msgpack::object>>();
-			value.SetObject();
-
-			for (auto& entry : list)
-			{
-				rapidjson::Value inValue;
-				ConvertToJSON(entry.second, inValue, allocator);
-
-				rapidjson::Value name;
-				name.SetString(entry.first.c_str(), entry.first.size(), allocator);
-
-				value.AddMember(name, inValue, allocator);
-			}
-
-			break;
-		}
-
-		default:
-			value.SetNull();
-			break;
-	}
-}
 
 class ResourceUIScriptRuntime;
 
@@ -191,11 +43,23 @@ public:
 class ResourceUIScriptRuntime : public fx::OMClass<ResourceUIScriptRuntime, IScriptRuntime, IScriptRefRuntime>
 {
 private:
+	struct RefData
+	{
+		std::atomic<int32_t> refCount;
+		ResUIResultCallback callback;
+
+		RefData(ResUIResultCallback cb)
+			: callback(cb), refCount(0)
+		{
+
+		}
+	};
+
 	fx::Resource* m_resource;
 
 	IScriptHost* m_scriptHost;
 
-	std::map<int32_t, ResUIResultCallback> m_refs;
+	std::map<int32_t, std::unique_ptr<RefData>> m_refs;
 
 	std::recursive_mutex m_refMutex;
 
@@ -269,7 +133,7 @@ result_t ResourceUIScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized, 
 			return FX_E_INVALIDARG;
 		}
 
-		cb = it->second;
+		cb = it->second->callback;
 	}
 
 	// convert the argument array from msgpack to JSON
@@ -316,12 +180,10 @@ result_t ResourceUIScriptRuntime::DuplicateRef(int32_t refIdx, int32_t* outRef)
 		return FX_E_INVALIDARG;
 	}
 
-	int32_t idx = m_refIdx;
-	m_refs[idx] = it->second;
+	auto& refData = it->second;
+	++refData->refCount;
 
-	m_refIdx++;
-
-	*outRef = idx;
+	*outRef = refIdx;
 
 	return FX_S_OK;
 }
@@ -329,7 +191,19 @@ result_t ResourceUIScriptRuntime::DuplicateRef(int32_t refIdx, int32_t* outRef)
 result_t ResourceUIScriptRuntime::RemoveRef(int32_t refIdx)
 {
 	std::unique_lock<std::recursive_mutex> lock(m_refMutex);
-	m_refs.erase(refIdx);
+
+	auto it = m_refs.find(refIdx);
+
+	if (it == m_refs.end())
+	{
+		return FX_E_INVALIDARG;
+	}
+
+	auto& refData = it->second;
+	if (--refData->refCount <= 0)
+	{
+		m_refs.erase(refIdx);
+	}
 
 	return FX_S_OK;
 }
@@ -340,7 +214,7 @@ std::string ResourceUIScriptRuntime::AddCallbackRef(ResUIResultCallback resultCa
 
 	// add the ref to the list
 	int32_t idx = m_refIdx;
-	m_refs[idx] = resultCallback;
+	m_refs.emplace(idx, std::make_unique<RefData>(resultCallback));
 
 	m_refIdx++;
 

@@ -23,6 +23,29 @@
 #include <gameSkeleton.h>
 #include "Streaming.h"
 
+namespace rage
+{
+	static hook::cdecl_stub<void(const fwRefAwareBase* self, void** ref)> _addKnownRef([]()
+	{
+		return hook::get_call(hook::get_pattern("74 20 48 85 C9 74 08", 29));
+	});
+
+	static hook::cdecl_stub<void(const fwRefAwareBase* self, void** ref)> _removeKnownRef([]()
+	{
+		return hook::get_call(hook::get_pattern("74 20 48 85 C9 74 08", 10));
+	});
+
+	void fwRefAwareBase::AddKnownRef(void** ref) const
+	{
+		return _addKnownRef(this, ref);
+	}
+
+	void fwRefAwareBase::RemoveKnownRef(void** ref) const
+	{
+		return _removeKnownRef(this, ref);
+	}
+}
+
 fwArchetypeDef::~fwArchetypeDef()
 {
 
@@ -45,6 +68,16 @@ fwEntityDef::~fwEntityDef()
 int64_t fwEntityDef::GetTypeIdentifier()
 {
 	return 0;
+}
+
+static hook::cdecl_stub<void(CMapData*)> _mapData_ctor([]()
+{
+	return hook::get_pattern("48 89 01 48 89 91 E0 00 00 00 89 91 E8 00 00 00", -0x70);
+});
+
+CMapData::CMapData()
+{
+	_mapData_ctor(this);
 }
 
 static hook::cdecl_stub<void*(fwEntityDef*, int fileIdx, fwArchetype* archetype, uint64_t* archetypeUnk)> fwEntityDef__instantiate([] ()
@@ -79,23 +112,6 @@ void* CustomVTWrapper(void* a1, void* a2, void* a3, void* a4, void* a5, void* a6
 
 	return origFunc(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
 }
-
-struct CMapDataContents
-{
-	void* vtable;
-	void* sceneNodes;
-	void** entities;
-	uint32_t numEntities;
-};
-
-struct CMapData
-{
-	uint8_t pad[20];
-	uint32_t unkBool;
-	uint8_t pad2[40];
-	float aabbMin[4];
-	float aabbMax[4];
-};
 
 static hook::cdecl_stub<CMapDataContents*()> makeMapDataContents([] ()
 {
@@ -474,18 +490,18 @@ void ParseArchetypeFile(char* text, size_t length)
 
 			trace("adding to scene...\n");
 
-			CMapData mapData = { 0 };
-			mapData.aabbMax[0] = aabbMax[0];
-			mapData.aabbMax[1] = aabbMax[1];
-			mapData.aabbMax[2] = aabbMax[2];
-			mapData.aabbMax[3] = FLT_MAX;
+			CMapData mapData;
+			mapData.entitiesExtentsMax[0] = aabbMax[0];
+			mapData.entitiesExtentsMax[1] = aabbMax[1];
+			mapData.entitiesExtentsMax[2] = aabbMax[2];
+			mapData.entitiesExtentsMax[3] = FLT_MAX;
 
-			mapData.aabbMin[0] = aabbMin[0];
-			mapData.aabbMin[1] = aabbMin[1];
-			mapData.aabbMin[2] = aabbMin[2];
-			mapData.aabbMin[3] = 0.0f - FLT_MAX;
+			mapData.entitiesExtentsMin[0] = aabbMin[0];
+			mapData.entitiesExtentsMin[1] = aabbMin[1];
+			mapData.entitiesExtentsMin[2] = aabbMin[2];
+			mapData.entitiesExtentsMin[3] = 0.0f - FLT_MAX;
 
-			mapData.unkBool = 2;
+			mapData.contentFlags = 2;
 
 			addToScene(contents, &mapData, false, false);
 			
@@ -644,4 +660,16 @@ static HookFunction hookFunction([] ()
 	//hook::nop(hook::pattern("0F 50 C0 83 E0 07 3C 07 0F 94 C1 85 D1 74 43").count(1).get(0).get<void>(13), 2);
 
 	//__debugbreak();
+});
+
+static size_t g_seatManagerOffset;
+
+VehicleSeatManager* CVehicle::GetSeatManager()
+{
+	return reinterpret_cast<VehicleSeatManager*>(reinterpret_cast<char*>(this) + g_seatManagerOffset);
+}
+
+static HookFunction hookFunctionSeatManager([]()
+{
+	g_seatManagerOffset = *hook::get_pattern<uint32_t>("4C 8D B7 ? ? ? ? 41 8B DD 45 38 2E 7E 32", 3);
 });

@@ -7,6 +7,7 @@
 
 #include "StdInc.h"
 #include <HttpServerImpl.h>
+#include <TLSServer.h>
 #include <ros/LoopbackTcpServer.h>
 #include <ros/EndpointMapper.h>
 
@@ -16,35 +17,43 @@ class VersioningHandler : public net::HttpHandler
 {
 private:
 	std::map<std::string, std::string> m_data;
+	std::string m_url;
 
 public:
-	VersioningHandler()
+	VersioningHandler(const std::string& url, std::initializer_list<std::string> files)
+		: m_url(url)
 	{
 		auto loadData = [&] (const std::string& filename)
 		{
 			std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
 
-			std::ifstream file(MakeRelativeCitPath(L"citizen/ros/" + converter.from_bytes(filename)), std::ios::in | std::ios::binary);
+			std::vector<char> outBlob;
 
-			m_data[filename] = std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			FILE* f = _pfopen(MakeRelativeCitPath(L"citizen/ros/" + converter.from_bytes(filename)).c_str(), _P("rb"));
+			assert(f);
+
+			fseek(f, 0, SEEK_END);
+			outBlob.resize(ftell(f));
+
+			fseek(f, 0, SEEK_SET);
+			fread(outBlob.data(), 1, outBlob.size(), f);
+
+			fclose(f);
+
+			m_data[filename] = std::string(outBlob.data(), outBlob.size());
 		};
 
-		loadData("versioning.xml");
-		loadData("launcher_online_config.xml");
-
-		// SCUI assets
-		loadData("splash.png");
-		loadData("logotype.ttf");
-		loadData("fontawesome-webfont.ttf");
-		loadData("font-awesome.css");
-		loadData("roboto.ttf");
+		for (auto& file : files)
+		{
+			loadData(file);
+		}
 	}
 
 	bool HandleRequest(fwRefContainer<net::HttpRequest> request, fwRefContainer<net::HttpResponse> response) override
 	{
 		trace("versioning: %s\n", request->GetPath().c_str());
 
-		if (request->GetPath().find("/prod/gtav/") == 0)
+		if (request->GetPath().find(m_url) == 0)
 		{
 			response->SetStatusCode(200);
 
@@ -57,7 +66,7 @@ public:
 				response->SetHeader("Content-Type", "text/xml; charset=utf-8");
 			}
 
-			response->End(m_data[request->GetPath().substr(11)]);
+			response->End(m_data[request->GetPath().substr(m_url.length())]);
 		}
 		else
 		{
@@ -73,8 +82,11 @@ public:
 static InitFunction initFunction([] ()
 {
 	// create the handler
-	VersioningHandler* handler = new VersioningHandler();
+	VersioningHandler* handler = new VersioningHandler("/prod/gtav/", { "versioning.xml", "launcher_online_config.xml", "splash.png", "logotype.ttf", "fontawesome-webfont.ttf", "font-awesome.css", "roboto.ttf" } );
 	handler->AddRef();
+
+	VersioningHandler* publicHandler = new VersioningHandler("/public/", { "title_metadata.json", "launcher_online_config.xml", "recognised_titles.json", "legacy_titles.json" });
+	publicHandler->AddRef();
 
 	LoopbackTcpServerManager* tcpServerManager = Instance<LoopbackTcpServerManager>::Get();
 
@@ -90,8 +102,25 @@ static InitFunction initFunction([] ()
 	// attach the HTTP server
 	httpServer->AttachToServer(insecureServer);
 
+	// create public handler
+	net::HttpServer* httpServer2 = new net::HttpServerImpl();
+	httpServer2->AddRef();
+	httpServer2->RegisterHandler(publicHandler);
+
+	// create the TLS backend server
+	fwRefContainer<LoopbackTcpServer> secureServer = tcpServerManager->RegisterTcpServer("gamedownloads-rockstargames-com.akamaized.net");
+	secureServer->AddRef();
+	secureServer->SetPort(443);
+
+	// create the TLS wrapper for the TLS backend
+	net::TLSServer* tlsWrapper = new net::TLSServer(secureServer, "citizen/ros/ros.crt", "citizen/ros/ros.key");
+	tlsWrapper->AddRef();
+
+	httpServer2->AttachToServer(tlsWrapper);
+
 	// also register the versioning handler for ROS SCUI
 	EndpointMapper* endpointMapper = Instance<EndpointMapper>::Get();
 
 	endpointMapper->AddPrefix("/prod/gtav/", handler);
+	endpointMapper->AddPrefix("/public/", publicHandler);
 });

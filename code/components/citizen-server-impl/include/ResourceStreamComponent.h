@@ -18,10 +18,29 @@ namespace fx
 			uint32_t rscVersion;
 			uint32_t size;
 			bool isResource;
+
+			std::string GetCacheString();
+		};
+
+		struct StorageEntry : public Entry
+		{
+			inline StorageEntry(const Entry& entry)
+				: Entry(entry), isAutoScan(false)
+			{
+
+			}
+
+			bool isAutoScan;
 		};
 
 	public:
-		const std::map<std::string, Entry>& GetStreamingList();
+		const std::map<std::string, StorageEntry>& GetStreamingList();
+
+		StorageEntry* AddStreamingFile(const Entry& entry);
+
+		StorageEntry* AddStreamingFile(const std::string& entryName, const std::string& fullPath, const std::string& cacheString);
+
+		StorageEntry* AddStreamingFile(const std::string& fullPath);
 
 		virtual void AttachToObject(fx::Resource* object) override;
 
@@ -33,7 +52,7 @@ namespace fx
 	private:
 		fx::Resource* m_resource;
 
-		std::map<std::string, Entry> m_resourcePairs;
+		std::map<std::string, StorageEntry> m_resourcePairs;
 	};
 }
 

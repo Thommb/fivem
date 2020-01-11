@@ -64,12 +64,8 @@ static InitFunction initFunction([] ()
 			// somewhat insane sanity check at the last minute
 			if (frameName.find('"') == std::string::npos)
 			{
-				// send to NUI as a formatted root script (std::string constructor is used to prevent having to count bytes)
-				std::stringstream stream;
-				stream << "citFrames[\"" << frameName << "\"].contentWindow.postMessage(" << data << ", '*');";
-
-				// execute in the root
-				nui::ExecuteRootScript(stream.str());
+				// send to NUI
+				nui::PostFrameMessage(frameName, std::string(data));
 			}
 		};
 	};
@@ -183,7 +179,7 @@ static InitFunction initFunction([] ()
 
 		bool SendMessage(const char* jsonString)
 		{
-			fx::ScriptContext fakeCxt;
+			fx::ScriptContextBuffer fakeCxt;
 			fakeCxt.Push(jsonString);
 
 			sendMessageToFrame(fakeCxt, "SEND_DUI_MESSAGE", [this](std::string_view data)
@@ -343,7 +339,7 @@ static InitFunction initFunction([] ()
 							bool hasFocus = context.GetArgument<bool>(0);
 
 							const char* functionName = (hasFocus) ? "focusFrame" : "blurFrame";
-							nui::ExecuteRootScript(va("%s(\"%s\");", functionName, resource->GetName().c_str()));
+							nui::PostRootMessage(fmt::sprintf(R"({ "type": "%s", "frameName": "%s" } )", functionName, resource->GetName()));
 
 							nui::GiveFocus(hasFocus, context.GetArgument<bool>(1));
 						}
@@ -357,7 +353,15 @@ static InitFunction initFunction([] ()
 	{
 		POINT cursorPos;
 		GetCursorPos(&cursorPos);
-		ScreenToClient(FindWindow(L"grcWindow", nullptr), &cursorPos);
+		ScreenToClient(FindWindow(
+#ifdef GTA_FIVE
+			L"grcWindow"
+#elif defined(IS_RDR3)
+			L"sgaWindow"
+#else
+			L"UNKNOWN_WINDOW"
+#endif
+		, nullptr), &cursorPos);
 
 		*context.GetArgument<int*>(0) = cursorPos.x;
 		*context.GetArgument<int*>(1) = cursorPos.y;

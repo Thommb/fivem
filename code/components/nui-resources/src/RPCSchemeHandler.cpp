@@ -158,7 +158,10 @@ public:
 		CefResponse::HeaderMap map;
 		response->GetHeaderMap(map);
 
-		map.insert(std::make_pair("cache-control", "no-cache, must-revalidate"));
+		map.insert({ "cache-control", "no-cache, must-revalidate" });
+		map.insert({ "access-control-allow-origin", "*" });
+		map.insert({ "access-control-allow-methods", "POST, GET, OPTIONS" });
+
 		response->SetHeaderMap(map);
 
 		if (m_found)
@@ -207,7 +210,7 @@ static InitFunction initFunction([] ()
 {
 	OnSchemeCreateRequest.Connect([] (const char* name, CefRefPtr<CefRequest> request, CefRefPtr<CefResourceHandler>& handler)
 	{
-		if (!strcmp(name, "http"))
+		if (!strcmp(name, "http") || !strcmp(name, "https"))
 		{
 			handler = new RPCResourceHandler();
 		}

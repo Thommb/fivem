@@ -13,26 +13,38 @@
 #define GTA_GAME_EXPORT DLL_IMPORT
 #endif
 
- // needs to be kept in sync with gta:net:five
-struct ScInAddr
+struct netIpAddress
+{
+	union
+	{
+		uint32_t addr;
+		uint8_t bytes[4];
+	};
+};
+
+struct netSocketAddress
+{
+	netIpAddress ip;
+	uint16_t port;
+};
+
+struct netPeerAddress
 {
 	uint64_t unkKey1;
 	uint64_t unkKey2;
 	uint32_t secKeyTime; // added in 393
-	uint32_t ipLan;
-	uint16_t portLan;
-	uint32_t ipUnk;
-	uint16_t portUnk;
-	uint32_t ipOnline;
-	uint16_t portOnline;
-	uint16_t pad3;
+	netSocketAddress relayAddr;
+	netSocketAddress publicAddr;
+	netSocketAddress localAddr;
 	uint32_t newVal; // added in 372
 	uint64_t rockstarAccountId; // 463/505
 };
 
-struct ScPlayerData
+struct rlGamerInfo
 {
-	ScInAddr addr;
+	netPeerAddress peerAddress;
+	uint64_t systemKey;
+	uint64_t gamerId;
 };
 
 namespace rage
@@ -52,8 +64,7 @@ namespace rage
 
 		virtual void m_28() = 0;
 
-		// contains ScInAddr as well
-		virtual ScPlayerData* GetPlatformPlayerData() = 0;
+		virtual rlGamerInfo* GetGamerInfo() = 0;
 	};
 }
 
@@ -61,6 +72,16 @@ class CNetGamePlayer : public rage::netPlayer
 {
 public:
 	virtual void m_38() = 0;
+
+public:
+	uint8_t pad[8];
+	void* nonPhysicalPlayerData;
+	uint8_t pad2[20];
+	uint8_t activePlayerIndex;
+	uint8_t physicalPlayerIndex;
+	uint8_t pad3[2];
+	uint8_t pad4[120];
+	void* playerInfo;
 };
 
 class CNetworkPlayerMgr

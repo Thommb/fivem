@@ -33,8 +33,8 @@ public:
 	{
 		try
 		{
-			std::ifstream serverKeyStream(serverKey);
-			std::ifstream serverCertStream(serverCert);
+			std::ifstream serverKeyStream(serverKey, std::ios::binary);
+			std::ifstream serverCertStream(serverCert, std::ios::binary);
 			
 			if (serverCertStream && serverKeyStream)
 			{
@@ -115,9 +115,54 @@ public:
 	}
 };
 
+#ifdef IS_FXSERVER
+// hardened policy
+class ServerTLSPolicy : public Botan::TLS::Policy
+{
+public:
+	virtual bool abort_connection_on_undesired_renegotiation() const
+	{
+		return true;
+	}
+};
+#endif
+
+// policy allowing TLS_RSA_WITH_AES_256_CBC_SHA256 since ROS SDK wants this
 class TLSPolicy : public Botan::TLS::Policy
 {
 public:
+	virtual std::vector<std::string> allowed_ciphers() const override
+	{
+		return {
+			"ChaCha20Poly1305",
+			"AES-256/GCM",
+			"AES-128/GCM",
+			"AES-256/CCM",
+			"AES-128/CCM",
+			//"AES-256/CCM(8)",
+			//"AES-128/CCM(8)",
+			//"Camellia-256/GCM",
+			//"Camellia-128/GCM",
+			//"ARIA-256/GCM",
+			//"ARIA-128/GCM",
+			"AES-256", // ROS wants this
+			"AES-128",
+			//"Camellia-256",
+			//"Camellia-128",
+			//"SEED"
+			//"3DES",
+		};
+	}
+
+	virtual std::vector<std::string> allowed_signature_methods() const override
+	{
+		return {
+			"ECDSA",
+			"RSA",
+			"IMPLICIT",
+		};
+	}
+
 	virtual bool acceptable_protocol_version(Botan::TLS::Protocol_Version version) const override
 	{
 		return true;
@@ -138,7 +183,7 @@ public:
 			"CECPQ1",
 			"ECDH",
 			"DH",
-			"RSA",
+			"RSA", // ROS wants this
 		};
 	}
 };
@@ -155,7 +200,12 @@ TLSServerStream::TLSServerStream(TLSServer* server, fwRefContainer<TcpServerStre
 
 void TLSServerStream::Initialize()
 {
+#ifndef IS_FXSERVER
 	m_policy = std::make_unique<TLSPolicy>();
+#else
+	m_policy = std::make_unique<ServerTLSPolicy>();
+#endif
+
 	m_sessionManager = std::make_unique<Botan::TLS::Session_Manager_In_Memory>(m_rng);
 
 	m_tlsServer.reset(new Botan::TLS::Server(
@@ -165,6 +215,18 @@ void TLSServerStream::Initialize()
 		*(m_policy.get()),
 		m_rng
 	));
+
+	// first set the close callback, since SetReadCallback may in fact replay queued reads
+	{
+		fwRefContainer<TLSServerStream> thisRef = this;
+
+		m_baseStream->SetCloseCallback([=]()
+		{
+			fwRefContainer<TLSServerStream> scopedThisRef = thisRef;
+
+			CloseInternal();
+		});
+	}
 
 	m_baseStream->SetReadCallback([=] (const std::vector<uint8_t>& data)
 	{
@@ -177,17 +239,10 @@ void TLSServerStream::Initialize()
 		}
 		catch (std::exception& e)
 		{
+#ifndef IS_FXSERVER
 			trace("%s\n", e.what());
+#endif
 		}
-	});
-
-	fwRefContainer<TLSServerStream> thisRef = this;
-
-	m_baseStream->SetCloseCallback([=] ()
-	{
-		fwRefContainer<TLSServerStream> scopedThisRef = thisRef;
-
-		CloseInternal();
 	});
 }
 
@@ -196,14 +251,48 @@ PeerAddress TLSServerStream::GetPeerAddress()
 	return m_baseStream->GetPeerAddress();
 }
 
+void TLSServerStream::Write(const std::string& data)
+{
+	DoWrite<decltype(data)>(data);
+}
+
 void TLSServerStream::Write(const std::vector<uint8_t>& data)
 {
-	m_tlsServer->send(data);
+	DoWrite<decltype(data)>(data);
+}
+
+void TLSServerStream::Write(std::string&& data)
+{
+	DoWrite<decltype(data)>(std::move(data));
+}
+
+void TLSServerStream::Write(std::vector<uint8_t>&& data)
+{
+	DoWrite<decltype(data)>(std::move(data));
 }
 
 void TLSServerStream::Close()
 {
-	m_tlsServer->close();
+	fwRefContainer<TLSServerStream> thisRef = this;
+
+	ScheduleCallback([thisRef]()
+	{
+		auto tlsServer = thisRef->m_tlsServer;
+
+		if (tlsServer)
+		{
+			try
+			{
+				tlsServer->close();
+			}
+			catch (const std::exception& e)
+			{
+#ifndef IS_FXSERVER
+				trace("tls close: %s\n", e.what());
+#endif
+			}
+		}
+	});
 }
 
 void TLSServerStream::WriteToClient(const uint8_t buf[], size_t length)
@@ -240,7 +329,9 @@ void TLSServerStream::ReceivedAlert(Botan::TLS::Alert alert, const uint8_t[], si
 	}
 	else
 	{
+#ifndef IS_FXSERVER
 		trace("alert %s\n", alert.type_string().c_str());
+#endif
 	}
 }
 
@@ -285,6 +376,14 @@ void TLSServerStream::CloseInternal()
 	SetReadCallback(TReadCallback());
 
 	m_parentServer->CloseStream(this);
+}
+
+void TLSServerStream::ScheduleCallback(const TScheduledCallback& callback)
+{
+	if (m_baseStream.GetRef())
+	{
+		m_baseStream->ScheduleCallback(callback);
+	}
 }
 
 TLSServer::TLSServer(fwRefContainer<TcpServer> baseServer, const std::string& certificatePath, const std::string& keyPath, bool autoGenerate)

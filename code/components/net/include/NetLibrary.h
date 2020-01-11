@@ -10,6 +10,7 @@
 #include <bitset>
 #include <functional>
 #include <thread>
+#include <ppltasks.h>
 #include <WS2tcpip.h>
 #include "HttpClient.h"
 #include "CrossLibraryInterfaces.h"
@@ -19,6 +20,9 @@
 #include "NetLibraryImplBase.h"
 
 #include <NetAddress.h>
+
+// hacky include path to not conflict with our own NetBuffer.h
+#include <../../components/net-base/include/NetBuffer.h>
 
 #include <enet/enet.h>
 
@@ -154,11 +158,17 @@ private:
 
 	net::PeerAddress m_currentServerPeer;
 
+	std::string m_currentServerUrl;
+
 	std::string m_token;
 
 	uint32_t m_lastConnect;
 
 	uint32_t m_connectAttempts;
+
+	uint32_t m_lastReconnect;
+
+	uint32_t m_reconnectAttempts;
 
 	HttpClient* m_httpClient;
 
@@ -176,10 +186,14 @@ private:
 
 	HANDLE m_receiveEvent;
 
+	concurrency::concurrent_queue<std::function<void()>> m_mainFrameQueue;
+
+	std::function<void(const std::string&, const std::string&)> m_cardResponseHandler;
+
 private:
 	typedef std::function<void(const char* buf, size_t len)> ReliableHandlerType;
 
-	std::unordered_multimap<uint32_t, ReliableHandlerType> m_reliableHandlers;
+	std::unordered_multimap<uint32_t, std::tuple<ReliableHandlerType, bool>> m_reliableHandlers;
 
 private:
 	std::mutex m_incomingPacketMutex;
@@ -215,7 +229,7 @@ public:
 
 	virtual void RunFrame() override;
 
-	virtual void ConnectToServer(const net::PeerAddress& address);
+	virtual concurrency::task<void> ConnectToServer(const std::string& rootUrl);
 
 	virtual void Disconnect(const char* reason) override;
 
@@ -226,6 +240,10 @@ public:
 	virtual void RoutePacket(const char* buffer, size_t length, uint16_t netID) override;
 
 	virtual void SendReliableCommand(const char* type, const char* buffer, size_t length) override;
+
+	void SendUnreliableCommand(const char* type, const char* buffer, size_t length);
+
+	void RunMainFrame();
 
 	void HandleConnected(int serverNetID, int hostNetID, int hostBase, int slotID, uint64_t serverTime) override;
 
@@ -245,16 +263,22 @@ public:
 
 	void DownloadsComplete();
 
+	bool IsPendingInGameReconnect();
+
 	// waits for connection during the pre-game loading sequence
 	bool ProcessPreGameTick();
 
-	void AddReliableHandler(const char* type, const ReliableHandlerType& function);
+	void AddReliableHandler(const char* type, const ReliableHandlerType& function, bool runOnMainThreadOnly = false);
 
 	void Death();
 
 	void Resurrection();
 
 	void CancelDeferredConnection();
+
+	void SubmitCardResponse(const std::string& dataJson, const std::string& token);
+
+	uint64_t GetGUID();
 
 	void SendNetEvent(const std::string& eventName, const std::string& argsSerialized, int target);
 
@@ -275,6 +299,11 @@ public:
 	inline virtual net::PeerAddress GetCurrentPeer()
 	{
 		return m_currentServerPeer;
+	}
+
+	inline virtual const std::string& GetCurrentServerUrl() override
+	{
+		return m_currentServerUrl;
 	}
 
 	inline int GetServerProtocol() override
@@ -323,6 +352,10 @@ public:
 
 	fwEvent<const char*> OnConnectionError;
 
+	// a1: adaptive card JSON
+	// a2: connection token
+	fwEvent<const std::string&, const std::string&> OnConnectionCardPresent;
+
 	// a1: status message
 	// a2: current progress
 	// a3: total progress
@@ -331,12 +364,23 @@ public:
 	// a1: detailed progress message
 	fwEvent<const std::string&> OnConnectionSubProgress;
 
+	// a1: message to spam the player with
+	fwEvent<const std::string&> OnReconnectProgress;
+
 	// event to intercept connection requests
 	// return false to intercept connection (and call the callback to continue)
 	// this won't like more than one interception attempt, however
 	// a1: connection address
 	// a2: continuation callback
-	fwEvent<const net::PeerAddress&, const std::function<void()>&> OnInterceptConnection;
+	fwEvent<const std::string&, const std::function<void()>&> OnInterceptConnection;
+
+	// same as the other routine, except it's for authentication
+	fwEvent<const std::string&, const std::function<void(bool success, const std::map<std::string, std::string>& additionalPostData)>&> OnInterceptConnectionForAuth;
+
+	// event to intercept server events for debugging
+	// a1: event name
+	// a2: event payload
+	fwEvent<const std::string&, const std::string&> OnTriggerServerEvent;
 
 	static
 #ifndef COMPILING_NET
@@ -355,6 +399,8 @@ public:
 
 	fwEvent<const NetLibraryClientInfo&> OnClientInfoDropped;
 };
+
+DECLARE_INSTANCE_TYPE(NetLibrary);
 
 extern DLL_IMPORT fwEvent<const std::string&> OnRichPresenceSetTemplate;
 extern DLL_IMPORT fwEvent<int, const std::string&> OnRichPresenceSetValue;

@@ -7,16 +7,19 @@
 
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <mutex>
 #include <queue>
 
 #include <VFSDevice.h>
 
+#ifndef HTTP_EXPORT
 #ifdef COMPILING_HTTP_CLIENT
 #define HTTP_EXPORT DLL_EXPORT
 #else
-#define HTTP_EXPORT
+#define HTTP_EXPORT DLL_IMPORT
+#endif
 #endif
 
 namespace rage
@@ -32,16 +35,33 @@ struct ProgressInfo
 	size_t downloadNow;
 };
 
+struct HttpIgnoreCaseLess
+{
+	inline bool operator()(const std::string& left, const std::string& right) const
+	{
+		return _stricmp(left.c_str(), right.c_str()) < 0;
+	}
+};
+
+using HttpHeaderList = std::map<std::string, std::string, HttpIgnoreCaseLess>;
+using HttpHeaderListPtr = std::shared_ptr<HttpHeaderList>;
+
 struct HttpRequestOptions
 {
 	std::map<std::string, std::string> headers;
+	HttpHeaderListPtr responseHeaders;
+	std::shared_ptr<int> responseCode;
 	std::function<void(const ProgressInfo&)> progressCallback;
 	std::function<bool(const std::string&)> streamingCallback;
+	std::chrono::milliseconds timeoutNoResponse;
 	int weight;
+	bool ipv4;
 
 	inline HttpRequestOptions()
 	{
+		timeoutNoResponse = std::chrono::milliseconds(0);
 		weight = 16;
+		ipv4 = false;
 	}
 };
 
@@ -69,6 +89,8 @@ public:
 
 	HttpRequestPtr DoGetRequest(const std::string& url, const std::function<void(bool, const char*, size_t)>& callback);
 
+	HttpRequestPtr DoGetRequest(const std::string& url, const HttpRequestOptions& options, const std::function<void(bool, const char*, size_t)>& callback);
+
 	HttpRequestPtr DoGetRequest(const std::wstring& host, uint16_t port, const std::wstring& url, const std::function<void(bool, const char*, size_t)>& callback);
 
 	HttpRequestPtr DoPostRequest(const std::wstring& host, uint16_t port, const std::wstring& url, const std::map<std::string, std::string>& fields, const std::function<void(bool, const char*, size_t)>& callback);
@@ -82,6 +104,8 @@ public:
 
 	HttpRequestPtr DoPostRequest(const std::string& url, const std::string& postData, const HttpRequestOptions& options, const std::function<void(bool, const char*, size_t)>& callback, std::function<void(const std::map<std::string, std::string>&)> headerCallback = std::function<void(const std::map<std::string, std::string>&)>());
 
+	HttpRequestPtr DoMethodRequest(const std::string& method, const std::string& url, const std::string& postData, const HttpRequestOptions& options, const std::function<void(bool, const char*, size_t)>& callback, std::function<void(const std::map<std::string, std::string>&)> headerCallback = std::function<void(const std::map<std::string, std::string>&)>());
+
 	HttpRequestPtr DoFileGetRequest(const std::wstring& host, uint16_t port, const std::wstring& url, const char* outDeviceBase, const std::string& outFilename, const std::function<void(bool, const char*, size_t)>& callback);
 	HttpRequestPtr DoFileGetRequest(const std::wstring& host, uint16_t port, const std::wstring& url, fwRefContainer<vfs::Device> outDevice, const std::string& outFilename, const std::function<void(bool, const char*, size_t)>& callback);
 
@@ -93,6 +117,9 @@ public:
 
 	// compatibility wrapper
 	HttpRequestPtr DoFileGetRequest(const std::wstring& host, uint16_t port, const std::wstring& url, rage::fiDevice* outDevice, const std::string& outFilename, const std::function<void(bool, const char*, size_t)>& callback);
+
+public:
+	fwEvent<void*, const std::string&> OnSetupCurlHandle;
 
 private:
 	HttpClientImpl* m_impl;

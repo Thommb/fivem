@@ -5,6 +5,8 @@
 #include <ServerInstanceBase.h>
 #include <ServerInstanceBaseRef.h>
 
+#include <KeyedRateLimiter.h>
+
 #include <ResourceCallbackComponent.h>
 
 #include <ResourceManager.h>
@@ -13,6 +15,11 @@
 
 #include <optional>
 
+#include <json.hpp>
+#include <cfx_version.h>
+
+#include <MonoThreadAttachment.h>
+
 // HTTP handler
 static auto GetHttpHandler(fx::Resource* resource)
 {
@@ -20,6 +27,32 @@ static auto GetHttpHandler(fx::Resource* resource)
 	{
 
 	};
+}
+
+// blindly copypasted from StackOverflow (to allow std::function to store the funcref types with their move semantics)
+// TODO: we use this twice now, time for a shared header?
+template<class F>
+struct shared_function
+{
+	std::shared_ptr<F> f;
+	shared_function() = default;
+	shared_function(F&& f_) : f(std::make_shared<F>(std::move(f_))) {}
+	shared_function(shared_function const&) = default;
+	shared_function(shared_function&&) = default;
+	shared_function& operator=(shared_function const&) = default;
+	shared_function& operator=(shared_function&&) = default;
+
+	template<class...As>
+	auto operator()(As&&...as) const
+	{
+		return (*f)(std::forward<As>(as)...);
+	}
+};
+
+template<class F>
+shared_function<std::decay_t<F>> make_shared_function(F&& f)
+{
+	return { std::forward<F>(f) };
 }
 
 class ResourceHttpComponent : public fwRefCountable, public fx::IAttached<fx::Resource>
@@ -33,8 +66,9 @@ private:
 		std::string path;
 
 		fx::ResourceCallbackComponent::CallbackRef setDataHandler;
+		fx::ResourceCallbackComponent::CallbackRef setCancelHandler;
 
-		MSGPACK_DEFINE_MAP(headers, method, address, path, setDataHandler);
+		MSGPACK_DEFINE_MAP(headers, method, address, path, setDataHandler, setCancelHandler);
 	};
 
 	struct ResponseWrap
@@ -51,6 +85,17 @@ public:
 
 	void HandleRequest(const fwRefContainer<net::HttpRequest>& request, fwRefContainer<net::HttpResponse> response)
 	{
+		auto limiter = m_resource->GetManager()->GetComponent<fx::ServerInstanceBaseRef>()->Get()->GetComponent<fx::PeerAddressRateLimiterStore>()->GetRateLimiter("http_" + m_resource->GetName(), fx::RateLimiterDefaults{ 10.0, 25.0 });
+
+		if (!limiter->Consume(*net::PeerAddress::FromString(request->GetRemoteAddress())))
+		{
+			response->SetStatusCode(429);
+			response->SetHeader("Content-Type", "text/plain; charset=utf-8");
+			response->End("Rate limit exceeded.");
+
+			return;
+		}
+
 		// get the local path for the request
 		auto localPath = request->GetPath().substr(m_resource->GetName().length() + 2);
 
@@ -75,20 +120,55 @@ public:
 			requestWrap.address = request->GetRemoteAddress();
 			requestWrap.path = "/" + localPath;
 
-			requestWrap.setDataHandler = cbComponent->CreateCallback([=](const msgpack::unpacked& unpacked)
+			requestWrap.setCancelHandler = cbComponent->CreateCallback([=](const msgpack::unpacked& unpacked)
 			{
-				auto callback = unpacked.get().as<std::vector<msgpack::object>>()[0];
+				auto args = unpacked.get().as<std::vector<msgpack::object>>();
+
+				auto callback = args[0];
 
 				if (callback.type == msgpack::type::EXT)
 				{
 					if (callback.via.ext.type() == 10 || callback.via.ext.type() == 11)
 					{
-						std::string functionRef(callback.via.ext.data(), callback.via.ext.size);
+						fx::FunctionRef functionRef{ std::string{callback.via.ext.data(), callback.via.ext.size} };
 
-						request->SetDataHandler([=](const std::vector<uint8_t>& bodyArray)
+						request->SetCancelHandler(make_shared_function([this, functionRef = std::move(functionRef)]()
 						{
-							m_resource->GetManager()->CallReference<void>(functionRef, std::string(bodyArray.begin(), bodyArray.end()));
-						});
+							m_resource->GetManager()->CallReference<void>(functionRef.GetRef());
+						}));
+					}
+				}
+			});
+
+			requestWrap.setDataHandler = cbComponent->CreateCallback([=](const msgpack::unpacked& unpacked)
+			{
+				auto args = unpacked.get().as<std::vector<msgpack::object>>();
+
+				auto callback = args[0];
+				bool isBinary = false;
+
+				if (args.size() > 1)
+				{
+					isBinary = (args[1].as<std::string>() == "binary");
+				}
+
+				if (callback.type == msgpack::type::EXT)
+				{
+					if (callback.via.ext.type() == 10 || callback.via.ext.type() == 11)
+					{
+						fx::FunctionRef functionRef{ std::string{callback.via.ext.data(), callback.via.ext.size} };
+
+						request->SetDataHandler(make_shared_function([this, functionRef = std::move(functionRef), isBinary](const std::vector<uint8_t>& bodyArray)
+						{
+							if (isBinary)
+							{
+								m_resource->GetManager()->CallReference<void>(functionRef.GetRef(), bodyArray);
+							}
+							else
+							{
+								m_resource->GetManager()->CallReference<void>(functionRef.GetRef(), std::string(bodyArray.begin(), bodyArray.end()));
+							}
+						}));
 					}
 				}
 			});
@@ -110,12 +190,24 @@ public:
 				{
 					net::HeaderMap headers;
 
-					for (auto& pair : state[1].as<std::map<std::string, std::string>>())
+					for (auto& pair : state[1].as<std::map<std::string, msgpack::object>>())
 					{
-						response->SetHeader(pair.first, pair.second);
+						if (pair.second.type == msgpack::type::ARRAY)
+						{
+							response->SetHeader(pair.first, pair.second.as<std::vector<std::string>>());
+						}
+						else
+						{
+							response->SetHeader(pair.first, pair.second.as<std::string>());
+						}
 					}
 
 					response->SetStatusCode(state[0].as<int>());
+				}
+
+				if (request->GetHttpVersion() != std::pair<int, int>{ 1, 0 })
+				{
+					response->WriteHead(response->GetStatusCode());
 				}
 			});
 
@@ -133,6 +225,7 @@ public:
 				}
 			});
 
+			MonoEnsureThreadAttached();
 			m_resource->GetManager()->CallReference<void>(*m_handlerRef, requestWrap, responseWrap);
 		}
 	}
@@ -215,5 +308,30 @@ static InitFunction initFunction([]()
 				resource->GetComponent<ResourceHttpComponent>()->SetHandlerRef(context.GetArgument<const char*>(0));
 			}
 		}
+	});
+
+	fx::ServerInstanceBase::OnServerCreate.Connect([](fx::ServerInstanceBase* instance)
+	{
+		instance->GetComponent<fx::HttpServerManager>()->AddEndpoint("/", [=](const fwRefContainer<net::HttpRequest>& request, const fwRefContainer<net::HttpResponse>& response)
+		{
+			auto resource = instance->GetComponent<fx::ResourceManager>()->GetResource("webadmin");
+
+			if (resource.GetRef() && resource->GetState() == fx::ResourceState::Started)
+			{
+				response->SetStatusCode(302);
+				response->SetHeader("Location", "/webadmin/");
+
+				response->End("Redirecting...");
+				return;
+			}
+
+			auto data = nlohmann::json::object(
+				{
+					{ "version", "FXServer-" GIT_DESCRIPTION }
+				}
+			);
+
+			response->End(data.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
+		});
 	});
 });

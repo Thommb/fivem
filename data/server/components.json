@@ -9,6 +9,7 @@
   "citizen:server:main",
   "citizen:server:instance",
   "citizen:server:impl",
+  "citizen:server:monitor",
   "citizen:resources:core",
   "citizen:resources:metadata:lua",
   "vfs:core",
@@ -17,5 +18,6 @@
   "svadhesive",
   "citizen:scripting:mono",
   "citizen:scripting:v8",
-  "voip-server:mumble"
+  "voip-server:mumble",
+  "http-client"
 ]

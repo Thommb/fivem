@@ -26,7 +26,7 @@ void ClientEngineMapper::LookupMethods()
 	void** methodPtr = *(void***)m_interface;
 	bool found = false;
 
-	methodPtr += 8;
+	methodPtr += 7;
 
 	while (IsValidCodePointer(*methodPtr))
 	{
@@ -85,7 +85,7 @@ void ClientEngineMapper::LookupMethods()
 	}
 }
 
-bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser)
+bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser, bool child)
 {
 	// output variable
 	const char* name = nullptr;
@@ -101,6 +101,10 @@ bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser)
 	ud_set_mode(&ud, 64);
 #endif
 
+	bool hadUnwantedCall = false;
+	bool hadExternCall = false;
+	bool hadMov = false;
+
 	// set the program counter
 	ud_set_pc(&ud, reinterpret_cast<uint64_t>(methodPtr));
 
@@ -112,23 +116,36 @@ bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser)
 	{
 		if (_strnicmp(operandPtr, "Assertion Failed:", 17) == 0)
 		{
-			if (strstr(operandPtr, "m_map"))
+			if (!child)
 			{
-				if (strstr(operandPtr, "mapClient"))
+				if (strstr(operandPtr, "m_map"))
 				{
-					*isUser = false;
+					if (strstr(operandPtr, "mapClient"))
+					{
+						*isUser = false;
+					}
+					else
+					{
+						*isUser = true;
+					}
+
+					return true;
 				}
-				else
+			}
+			else
+			{
+				if (strstr(operandPtr, "m_LessFunc"))
 				{
 					*isUser = true;
+					return true;
 				}
-
-				return true;
 			}
 		}
 
 		return false;
 	};
+
+	std::map<int, int> offCounts;
 
 	// loop the instructions
 	while (true)
@@ -138,6 +155,13 @@ bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser)
 
 		// if this is a retn, break from the loop
 		if (ud_insn_mnemonic(&ud) == UD_Iret)
+		{
+			break;
+		}
+
+		// to catch functions that are simply mov+jmp
+		if (ud_insn_mnemonic(&ud) == UD_Ijmp &&
+			ud_insn_off(&ud) < ((uint64_t)methodPtr + 16))
 		{
 			break;
 		}
@@ -173,7 +197,7 @@ bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser)
 #elif defined(_M_AMD64)
 		if (ud_insn_mnemonic(&ud) == UD_Ilea)
 		{
-			// get the first operand
+			// get the second operand
 			auto operand = ud_insn_opr(&ud, 1);
 
 			// if the operand is immediate
@@ -195,6 +219,85 @@ bool ClientEngineMapper::IsMethodAnInterface(void* methodPtr, bool* isUser)
 						}
 					}
 				}
+			}
+		}
+		else if (!child && ud_insn_mnemonic(&ud) == UD_Icall)
+		{
+			// get the first operand
+			auto operand = ud_insn_opr(&ud, 0);
+
+			bool isWantedCall = false;
+
+			// if the operand is immediate
+			if (operand->type == UD_OP_JIMM)
+			{
+				// cast the relative offset as a char
+				char* operandPtr = reinterpret_cast<char*>(ud_insn_len(&ud) + ud_insn_off(&ud) + operand->lval.sdword);
+
+				// if it's a valid data pointer as well
+				if (IsValidCodePointer(operandPtr))
+				{
+					// it's probably our pointer of interest!
+					if (IsMethodAnInterface(operandPtr, isUser, true) && hadExternCall)
+					{
+						return true;
+					}
+
+					hadExternCall = false;
+				}
+			}
+			else if (operand->type == UD_OP_MEM)
+			{
+				if (operand->base == UD_R_RIP)
+				{
+					char* operandPtr = reinterpret_cast<char*>(ud_insn_len(&ud) + ud_insn_off(&ud) + operand->lval.sdword);
+
+					if (*(char**)operandPtr == (char*)GetProcAddress(GetModuleHandleW(L"tier0_s64.dll"), "?Lock@CThreadMutex@@QEAAXXZ"))
+					{
+						hadExternCall = true;
+						isWantedCall = true;
+					}
+				}
+				else
+				{
+					// 2019-05 Steam seems to refactor this again, now user functions will do `call qword ptr [rdi+0F8h]` twice and don't have any nested normal CALL
+					if (hadExternCall)
+					{
+						offCounts[operand->lval.sdword]++;
+
+						if (offCounts[operand->lval.sdword] == 2)
+						{
+							*isUser = true;
+							return true;
+						}
+					}
+				}
+			}
+
+			if (!isWantedCall)
+			{
+				hadUnwantedCall = true;
+			}
+		}
+		// and another 2019-05 update breaks yet another thing
+		else if (!child && ud_insn_mnemonic(&ud) == UD_Icmp)
+		{
+			auto operand1 = ud_insn_opr(&ud, 0);
+			auto operand = ud_insn_opr(&ud, 1);
+
+			if (operand1->type == UD_OP_REG && operand->type == UD_OP_IMM && operand->lval.udword == 0xFF && hadExternCall && hadMov && !hadUnwantedCall)
+			{
+				*isUser = true;
+				return true;
+			}
+		}
+		else if (!child && ud_insn_mnemonic(&ud) == UD_Imov)
+		{
+			auto operand = ud_insn_opr(&ud, 1);
+
+			if (operand->type == UD_OP_REG && operand->base == UD_R_R8D)
+			{
+				hadMov = true;
 			}
 		}
 #else

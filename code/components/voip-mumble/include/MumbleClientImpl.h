@@ -29,7 +29,8 @@ enum class ClientTask
 	BeginConnect,
 	EndConnect,
 	RecvData,
-
+	UDPRead,
+	Unknown
 };
 
 class MumbleCredentialsManager : public Botan::Credentials_Manager
@@ -69,6 +70,14 @@ public:
 	}
 };
 
+class MumbleCrypto : public fwRefCountable
+{
+public:
+	virtual void Encrypt(const uint8_t* plain, uint8_t* cipher, size_t length) = 0;
+
+	virtual bool Decrypt(const uint8_t* cipher, uint8_t* plain, size_t length) = 0;
+};
+
 class MumbleClient : public IMumbleClient, public Botan::TLS::Callbacks
 {
 public:
@@ -80,13 +89,21 @@ public:
 
 	virtual MumbleConnectionInfo* GetConnectionInfo() override;
 
+	virtual void UpdateVoiceTarget(int idx, const VoiceTargetConfig& config) override;
+
+	virtual void SetVoiceTarget(int idx) override;
+
 	virtual bool IsAnyoneTalking() override;
 
 	virtual float GetInputAudioLevel() override;
 
 	virtual void SetChannel(const std::string& channelName) override;
 
+	virtual void SetClientVolumeOverride(const std::string& clientName, float volume) override;
+
 	virtual void GetTalkers(std::vector<std::string>* referenceIds) override;
+
+	virtual void SetPositionHook(const TPositionHook& hook) override;
 
 	virtual void SetAudioDistance(float distance) override;
 
@@ -115,6 +132,7 @@ private:
 
 	HANDLE m_socketConnectEvent;
 	HANDLE m_socketReadEvent;
+	HANDLE m_udpReadEvent;
 
 	HANDLE m_idleEvent;
 
@@ -148,10 +166,28 @@ private:
 	uint32_t m_tcpPingCount;
 	uint32_t m_tcpPings[12];
 
+	float m_udpPingAverage;
+	float m_udpPingVariance;
+
+	uint32_t m_udpPingCount;
+	uint32_t m_udpPings[12];
+
+	int m_voiceTarget;
+
+	std::chrono::milliseconds m_lastUdp;
+
+	SOCKET m_udpSocket;
+
+	TPositionHook m_positionHook;
+
+	fwRefContainer<MumbleCrypto> m_crypto;
+
 	std::string m_curManualChannel;
 
 public:
 	static fwRefContainer<MumbleClient> GetCurrent();
+
+	inline int GetVoiceTarget() { return m_voiceTarget; }
 
 	inline MumbleClientState& GetState() { return m_state; }
 
@@ -170,6 +206,19 @@ public:
 	}
 
 	void Send(MumbleMessageType type, const char* buf, size_t size);
+
+	void SendVoice(const char* buf, size_t size);
+
+	void SendUDP(const char* buf, size_t size);
+
+	void HandleVoice(const uint8_t* data, size_t size);
+
+	void HandleUDP(const uint8_t* buf, size_t size);
+
+	inline void SetCrypto(const fwRefContainer<MumbleCrypto>& crypto)
+	{
+		m_crypto = crypto;
+	}
 
 	// Botan::TLS::Callbacks
 public:

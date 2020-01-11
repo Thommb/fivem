@@ -1,25 +1,41 @@
 #include <StdInc.h>
 #include <ClientRegistry.h>
 
+#include <GameServer.h>
+
 #include <ServerInstanceBase.h>
 #include <ServerEventComponent.h>
 
 #include <msgpack.hpp>
+
+#include <ResourceManagerImpl.h>
+#include <ResourceEventComponent.h>
 
 extern std::shared_ptr<ConVar<bool>> g_oneSyncVar;
 
 namespace fx
 {
 	ClientRegistry::ClientRegistry()
-		: m_hostNetId(-1), m_curNetId(1), m_clientsBySlotId(MAX_CLIENTS)
+		: m_hostNetId(-1), m_curNetId(1), m_instance(nullptr)
 	{
-
+		if (fx::IsBigMode())
+		{
+			m_clientsBySlotId.resize(MAX_CLIENTS);
+		}
+		else
+		{
+			m_clientsBySlotId.resize(129);
+		}
 	}
 
 	std::shared_ptr<Client> ClientRegistry::MakeClient(const std::string& guid)
 	{
 		auto client = std::make_shared<Client>(guid);
-		m_clients[guid] = client;
+
+		{
+			std::unique_lock<std::shared_mutex> lock(m_clientsMutex);
+			m_clients[guid] = client;
+		}
 
 		std::weak_ptr<Client> weakClient(client);
 
@@ -28,11 +44,24 @@ namespace fx
 			m_clientsByNetId[weakClient.lock()->GetNetId()] = weakClient;
 		});
 
-		client->OnAssignPeer.Connect([=]()
+		client->OnAssignPeer.Connect([this, weakClient]()
 		{
-			m_clientsByPeer[weakClient.lock()->GetPeer()] = weakClient;
+			auto client = weakClient.lock();
+
+			if (!client)
+			{
+				return;
+			}
+
+			m_clientsByPeer[client->GetPeer()] = weakClient;
 
 			if (!g_oneSyncVar->GetValue())
+			{
+				return;
+			}
+
+			// reconnecting clients will assign a peer again, but should *not* be assigned a new slot ID
+			if (client->GetSlotId() != -1)
 			{
 				return;
 			}
@@ -78,19 +107,36 @@ namespace fx
 
 	void ClientRegistry::HandleConnectedClient(const std::shared_ptr<Client>& client)
 	{
-		// for name handling, send player state
-		fwRefContainer<ServerEventComponent> events = m_instance->GetComponent<ServerEventComponent>();
+		auto eventManager = m_instance->GetComponent<fx::ResourceManager>()->GetComponent<fx::ResourceEventManagerComponent>();
+		eventManager->TriggerEvent2("playerJoining", { fmt::sprintf("net:%d", client->GetNetId()) });
 
-		// send every player information about the joining client
-		events->TriggerClientEvent("onPlayerJoining", std::optional<std::string_view>(), client->GetNetId(), client->GetName(), client->GetSlotId());
-
-		// send the JOINING CLIENT information about EVERY OTHER CLIENT
-		std::string target = fmt::sprintf("%d", client->GetNetId());
-
-		ForAllClients([&](const std::shared_ptr<fx::Client>& otherClient)
+		if (!fx::IsBigMode())
 		{
-			events->TriggerClientEvent("onPlayerJoining", target, otherClient->GetNetId(), otherClient->GetName(), otherClient->GetSlotId());
-		});
+			// for name handling, send player state
+			fwRefContainer<ServerEventComponent> events = m_instance->GetComponent<ServerEventComponent>();
+
+			// send every player information about the joining client
+			events->TriggerClientEventReplayed("onPlayerJoining", std::optional<std::string_view>(), client->GetNetId(), client->GetName(), client->GetSlotId());
+
+			// send the JOINING CLIENT information about EVERY OTHER CLIENT
+			std::string target = fmt::sprintf("%d", client->GetNetId());
+
+			ForAllClients([&](const std::shared_ptr<fx::Client>& otherClient)
+			{
+				events->TriggerClientEventReplayed("onPlayerJoining", target, otherClient->GetNetId(), otherClient->GetName(), otherClient->GetSlotId());
+			});
+		}
+		else
+		{
+			fwRefContainer<ServerEventComponent> events = m_instance->GetComponent<ServerEventComponent>();
+
+			std::string target = fmt::sprintf("%d", client->GetNetId());
+
+			events->TriggerClientEventReplayed("onPlayerJoining", target, client->GetNetId(), client->GetName(), 128);
+		}
+
+		// trigger connection handlers
+		OnConnectedClient(client.get());
 	}
 
 	std::shared_ptr<fx::Client> ClientRegistry::GetHost()

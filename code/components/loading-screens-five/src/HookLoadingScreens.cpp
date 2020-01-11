@@ -14,7 +14,7 @@
 #include <udis86.h>
 #include <jitasm.h>
 
-#include <Brofiler.h>
+#include <optick.h>
 
 static int g_instrumentedFuncs;
 
@@ -285,6 +285,35 @@ static int ReturnTrue()
 	return 1;
 }
 
+static void(*dataFileMgr__loadDefDat)(void*, const char*, bool);
+
+int dlcIdx = -1;
+
+static void LoadDefDats(void* dataFileMgr, const char* name, bool enabled)
+{
+	rage::InitFunctionData ifd;
+	ifd.funcHash = HashRageString(name);
+	ifd.initOrder = 3;
+	ifd.shutdownOrder = 42;
+	ifd.initFunction = [](int)
+	{
+	};
+
+	if (dlcIdx >= 0)
+	{
+		rage::OnInitFunctionInvoking(rage::INIT_SESSION, 14 + dlcIdx, ifd);
+
+		dlcIdx++;
+	}
+
+	dataFileMgr__loadDefDat(dataFileMgr, name, enabled);
+
+	if (dlcIdx >= 0)
+	{
+		rage::OnInitFunctionInvoked(rage::INIT_SESSION, ifd);
+	}
+}
+
 static HookFunction hookFunction([] ()
 {
 	hook::jump(hook::get_pattern("44 8B D8 4D 63 C8 4C 3B C8 7D 33 8B", -0x16), &CDataFileMgr::FindNextEntry);
@@ -301,11 +330,11 @@ static HookFunction hookFunction([] ()
 		hook::return_function(hook::get_pattern("41 B8 97 96 11 96", -0x9A));
 	}
 
-#ifdef USE_PROFILER
+#if USE_OPTICK
 	struct ProfilerMetaData
 	{
-		Profiler::EventDescription* desc;
-		std::unique_ptr<Profiler::Event> ev;
+		Optick::EventDescription* desc;
+		std::unique_ptr<Optick::Event> ev;
 	};
 
 	static std::unordered_map<void*, ProfilerMetaData> g_profilerMap;
@@ -323,10 +352,10 @@ static HookFunction hookFunction([] ()
 
 			if (it == g_profilerMap.end())
 			{
-				it = g_profilerMap.emplace(func.func, ProfilerMetaData{ Profiler::EventDescription::Create(strdup(va("ProfileFunc %llx", (uintptr_t)func.func)), __FILE__, __LINE__, Profiler::Color::Red), nullptr }).first;
+				it = g_profilerMap.emplace(func.func, ProfilerMetaData{ Optick::EventDescription::Create(strdup(va("ProfileFunc %llx", (uintptr_t)func.func)), __FILE__, __LINE__, Optick::Color::Red), nullptr }).first;
 			}
 
-			it->second.ev = std::make_unique<Profiler::Event>(*it->second.desc);
+			it->second.ev = std::make_unique<Optick::Event>(*it->second.desc);
 		}
 
 		static void OnEnd(const InstrumentedFuncMeta& func)
@@ -357,6 +386,10 @@ static HookFunction hookFunction([] ()
 
 	// 'should packfile meta cache be used'
 	//hook::call(hook::get_pattern("E8 ? ? ? ? E8 ? ? ? ? 84 C0 0F 84 ? ? 00 00 44 39 35", 5), ReturnTrue);
+
+	auto hookPoint = hook::pattern("E8 ? ? ? ? 48 8B 1D ? ? ? ? 41 8B F7").count(1).get(0).get<void>(0);
+	hook::set_call(&dataFileMgr__loadDefDat, hookPoint);
+	hook::call(hookPoint, LoadDefDats); //Call the new function to load the handling files
 });
 
 static InitFunction initFunction([] ()

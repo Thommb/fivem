@@ -26,6 +26,12 @@
 
 #include <ServerIdentityProvider.h>
 
+#include <MonoThreadAttachment.h>
+
+#include <json.hpp>
+
+using json = nlohmann::json;
+
 static std::forward_list<fx::ServerIdentityProviderBase*> g_serverProviders;
 static std::map<std::string, fx::ServerIdentityProviderBase*> g_providersByType;
 
@@ -127,6 +133,7 @@ static bool VerifyTicket(const std::string& guid, const std::string& ticket)
 struct TicketData
 {
 	std::optional<std::array<uint8_t, 20>> entitlementHash;
+	std::optional<std::string> extraJson;
 };
 
 static std::optional<TicketData> VerifyTicketEx(const std::string& ticket)
@@ -202,6 +209,16 @@ static std::optional<TicketData> VerifyTicketEx(const std::string& ticket)
 		outData.entitlementHash = entitlementHash;
 	}
 
+	if (length >= 24)
+	{
+		uint32_t extraJsonLength = *(uint32_t*)&extraData[20];
+
+		if (length >= (24 + extraJsonLength))
+		{
+			outData.extraJson = std::string{ (char*)&extraData[24], extraJsonLength };
+		}
+	}
+
 	return outData;
 }
 
@@ -221,6 +238,8 @@ static InitFunction initFunction([]()
 		auto ehVar = instance->AddVariable<bool>("sv_enhancedHostSupport", ConVar_ServerInfo, false);
 
 		auto lanVar = instance->AddVariable<bool>("sv_lan", ConVar_ServerInfo, false);
+
+		auto enforceGameBuildVar = instance->AddVariable<std::string>("sv_enforceGameBuild", ConVar_None, "");
 
 		instance->GetComponent<fx::GameServer>()->OnTick.Connect([instance]()
 		{
@@ -252,18 +271,52 @@ static InitFunction initFunction([]()
 
 			auto nameIt = postMap.find("name");
 			auto guidIt = postMap.find("guid");
+			auto gameBuildIt = postMap.find("gameBuild");
+			auto gameNameIt = postMap.find("gameName");
 
 			auto protocolIt = postMap.find("protocol");
 
 			if (nameIt == postMap.end() || guidIt == postMap.end() || protocolIt == postMap.end())
 			{
-				cb(json::object({ {"error", "fields missing"} }));
+				sendError("fields missing");
 				return;
 			}
 
 			auto name = nameIt->second;
 			auto guid = guidIt->second;
 			auto protocol = atoi(protocolIt->second.c_str());
+			auto gameBuild = (gameBuildIt != postMap.end()) ? gameBuildIt->second : "0";
+			auto gameName = (gameNameIt != postMap.end()) ? gameNameIt->second : "";
+
+			// verify game name
+			bool validGameName = false;
+			std::string intendedGameName;
+
+			switch (instance->GetComponent<fx::GameServer>()->GetGameName())
+			{
+			case fx::GameName::GTA5:
+				intendedGameName = "gta5";
+
+				if (gameName.empty() || gameName == "gta5")
+				{
+					validGameName = true;
+				}
+				break;
+			case fx::GameName::RDR3:
+				intendedGameName = "rdr3";
+
+				if (gameName == "rdr3")
+				{
+					validGameName = true;
+				}
+				break;
+			}
+
+			if (!validGameName)
+			{
+				sendError(fmt::sprintf("Client/Server game mismatch: %s/%s", gameName, intendedGameName));
+				return;
+			}
 
 			// limit name length
 			if (name.length() >= 200)
@@ -280,39 +333,52 @@ static InitFunction initFunction([]()
 
 				if (ticketIt == postMap.end())
 				{
-					sendError("No FiveM ticket was specified. If this is an offline server, maybe set sv_lan?");
+					sendError("No CitizenFX ticket was specified. If this is an offline server, maybe set sv_lan?");
 					return;
 				}
 
-				if (!VerifyTicket(guid, ticketIt->second))
+				try
 				{
-					sendError("FiveM ticket authorization failed.");
-					return;
+					if (!VerifyTicket(guid, ticketIt->second))
+					{
+						sendError("CitizenFX ticket authorization failed.");
+						return;
+					}
+
+					auto optionalTicket = VerifyTicketEx(ticketIt->second);
+
+					if (!optionalTicket)
+					{
+						sendError("CitizenFX ticket authorization failed. (2)");
+						return;
+					}
+
+					ticketData = *optionalTicket;
 				}
-
-				auto optionalTicket = VerifyTicketEx(ticketIt->second);
-
-				if (!optionalTicket)
+				catch (const std::exception& e)
 				{
-					sendError("FiveM ticket authorization failed. (2)");
+					sendError(fmt::sprintf("Parsing error while verifying CitizenFX ticket. %s", e.what()));
 					return;
 				}
-
-				ticketData = *optionalTicket;
 			}
 
 			std::string token = boost::uuids::to_string(boost::uuids::basic_random_generator<boost::random_device>()());
 
 			json data = json::object();
 			data["protocol"] = 5;
+			data["bitVersion"] = 0x201912301309;
 			data["sH"] = shVar->GetValue();
 			data["enhancedHostSupport"] = ehVar->GetValue() && !g_oneSyncVar->GetValue();
 			data["onesync"] = g_oneSyncVar->GetValue();
+			data["onesync_big"] = fx::IsBigMode();
 			data["token"] = token;
-			data["netlibVersion"] = 2;
+			data["gamename"] = gameName;
 
 			auto clientRegistry = instance->GetComponent<fx::ClientRegistry>();
 			auto gameServer = instance->GetComponent<fx::GameServer>();
+
+			data["netlibVersion"] = gameServer->GetNetLibVersion();
+			data["maxClients"] = atoi(gameServer->GetVariable("sv_maxclients").c_str());
 
 			{
 				auto oldClient = clientRegistry->GetClientByGuid(guid);
@@ -343,6 +409,43 @@ static InitFunction initFunction([]()
 					hash[10], hash[11], hash[12], hash[13], hash[14], hash[15], hash[16], hash[17], hash[18], hash[19]));
 			}
 
+			bool gameNameMatch = false;
+
+			if (ticketData.extraJson)
+			{
+				try
+				{
+					json json = json::parse(*ticketData.extraJson);
+
+					if (json["gn"].is_string())
+					{
+						auto sentGameName = json["gn"].get<std::string>();
+
+						if (sentGameName == intendedGameName)
+						{
+							gameNameMatch = true;
+						}
+					}
+				}
+				catch (std::exception& e)
+				{
+
+				}
+
+				client->SetData("entitlementJson", *ticketData.extraJson);
+			}
+
+			if (lanVar->GetValue())
+			{
+				gameNameMatch = true;
+			}
+
+			if (!gameNameMatch)
+			{
+				sendError("CitizenFX ticket authorization failed. (3)");
+				return;
+			}
+
 			client->Touch();
 
 			auto it = g_serverProviders.begin();
@@ -371,8 +474,12 @@ static InitFunction initFunction([]()
 					std::string idType = identifier.substr(0, identifier.find_first_of(':'));
 
 					auto provider = g_providersByType[idType];
-					maxTrust = std::max(provider->GetTrustLevel(), maxTrust);
-					minVariance = std::min(provider->GetVarianceLevel(), minVariance);
+
+					if (provider)
+					{
+						maxTrust = std::max(provider->GetTrustLevel(), maxTrust);
+						minVariance = std::min(provider->GetVarianceLevel(), minVariance);
+					}
 				}
 
 				if (maxTrust < minTrustVar->GetValue() || minVariance > maxVarianceVar->GetValue())
@@ -383,13 +490,29 @@ static InitFunction initFunction([]()
 					return;
 				}
 
+				if (!enforceGameBuildVar->GetValue().empty() && enforceGameBuildVar->GetValue() != gameBuild)
+				{
+					clientRegistry->RemoveClient(client);
+
+					sendError(
+						fmt::sprintf(
+							"This server requires a different game build (%s) from the one you're using (%s). Tell the server owner to remove this check.",
+							enforceGameBuildVar->GetValue(),
+							gameBuild
+						)
+					);
+
+					return;
+				}
+
 				auto resman = instance->GetComponent<fx::ResourceManager>();
 				auto eventManager = resman->GetComponent<fx::ResourceEventManagerComponent>();
 				auto cbComponent = resman->GetComponent<fx::ResourceCallbackComponent>();
 
 				// TODO: replace with event stacks once implemented
-				std::string noReason("Resource prevented connection.");
-
+				auto noReason = std::make_shared<std::shared_ptr<std::string>>();
+				*noReason = std::make_shared<std::string>("Resource prevented connection.");
+				
 				auto deferrals = std::make_shared<std::shared_ptr<fx::ClientDeferral>>();
 				*deferrals = std::make_shared<fx::ClientDeferral>(instance, client);
 
@@ -405,6 +528,16 @@ static InitFunction initFunction([]()
 					if (ref1)
 					{
 						(*ref1)(json::object({ { "defer", true }, { "message", message }, { "deferVersion", 2 } }));
+					}
+				});
+
+				(*deferrals)->SetCardCallback([deferrals, cbRef, token](const std::string& card)
+				{
+					auto ref1 = *cbRef;
+
+					if (ref1)
+					{
+						(*ref1)(json::object({ { "defer", true }, { "card", card }, { "token", token }, { "deferVersion", 2 } }));
 					}
 				});
 
@@ -448,13 +581,15 @@ static InitFunction initFunction([]()
 					*deferrals = nullptr;
 				});
 
-				bool shouldAllow = eventManager->TriggerEvent2("playerConnecting", { fmt::sprintf("net:%d", client->GetNetId()) }, client->GetName(), cbComponent->CreateCallback([&](const msgpack::unpacked& unpacked)
+				MonoEnsureThreadAttached();
+
+				bool shouldAllow = eventManager->TriggerEvent2("playerConnecting", { fmt::sprintf("net:%d", client->GetNetId()) }, client->GetName(), cbComponent->CreateCallback([noReason](const msgpack::unpacked& unpacked)
 				{
 					auto obj = unpacked.get().as<std::vector<msgpack::object>>();
 
 					if (obj.size() == 1)
 					{
-						noReason = obj[0].as<std::string>();
+						**noReason = obj[0].as<std::string>();
 					}
 				}), (*deferrals)->GetCallbacks());
 
@@ -462,7 +597,7 @@ static InitFunction initFunction([]()
 				{
 					clientRegistry->RemoveClient(client);
 
-					sendError(noReason);
+					sendError(**noReason);
 					return;
 				}
 
@@ -504,7 +639,7 @@ static InitFunction initFunction([]()
 
 					auto thisIt = ++it;
 
-					auth->RunAuthentication(client, postMap, [=](boost::optional<std::string> err)
+					auth->RunAuthentication(client, request, postMap, [=](boost::optional<std::string> err)
 					{
 						if (err)
 						{
@@ -524,6 +659,42 @@ static InitFunction initFunction([]()
 			});
 
 			(**runOneIdentifier)(it);
+		});
+
+		instance->GetComponent<fx::ClientMethodRegistry>()->AddHandler("submitCard", [=](const std::map<std::string, std::string>& postMap, const fwRefContainer<net::HttpRequest>& request, const std::function<void(const json&)>& cb)
+		{
+			auto dataIt = postMap.find("data");
+			auto tokenIt = postMap.find("token");
+
+			if (dataIt == postMap.end() || tokenIt == postMap.end())
+			{
+				cb(json::object({ {"error", "fields missing"} }));
+				return;
+			}
+
+			auto clientRegistry = instance->GetComponent<fx::ClientRegistry>();
+			auto client = clientRegistry->GetClientByConnectionToken(tokenIt->second);
+
+			if (!client)
+			{
+				cb(json::object({ {"error", "no client"} }));
+				return;
+			}
+
+			auto deferralRef = client->GetData("deferralPtr");
+
+			if (deferralRef.has_value())
+			{
+				auto deferralPtr = std::any_cast<std::weak_ptr<fx::ClientDeferral>>(deferralRef);
+				auto deferrals = deferralPtr.lock();
+
+				if (deferrals)
+				{
+					deferrals->HandleCardResponse(dataIt->second);
+				}
+			}
+
+			cb(json::object({ { "result", "ok" } }));
 		});
 	}, 50);
 });

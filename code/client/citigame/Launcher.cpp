@@ -11,6 +11,8 @@
 #include "CrossLibraryInterfaces.h"
 #include "ResumeComponent.h"
 
+#include "Hooking.Aux.h"
+
 #include <ComponentLoader.h>
 
 IGameSpecToHooks* g_hooksDLL;
@@ -29,6 +31,8 @@ bool LauncherInterface::PreLoadGame(void* cefSandbox)
 	// initialize component instances
     if (!getenv("CitizenFX_ToolMode"))
     {
+		DisableToolHelpScope scope;
+
         ComponentLoader::GetInstance()->ForAllComponents([&] (fwRefContainer<ComponentData> componentData)
         {
             for (auto& instance : componentData->GetInstances())
@@ -48,7 +52,10 @@ bool LauncherInterface::PostLoadGame(HMODULE hModule, void(**entryPoint)())
 {
 	bool continueRunning = true;
 
-	ComponentLoader::GetInstance()->DoGameLoad(hModule);
+	{
+		DisableToolHelpScope scope;
+		ComponentLoader::GetInstance()->DoGameLoad(hModule);
+	}
 
 	// HooksDLL only exists for GTA_NY
 #ifdef GTA_NY
@@ -62,7 +69,7 @@ bool LauncherInterface::PostLoadGame(HMODULE hModule, void(**entryPoint)())
 #elif defined(PAYNE)
 	// don't modify the entry point
 	//*entryPoint = (void(*)())0;
-#elif defined(GTA_FIVE)
+#elif defined(_M_AMD64)
 #else
 #error TODO: define entry point for this title
 #endif
@@ -109,6 +116,8 @@ bool LauncherInterface::PreInitializeGame()
 	// run callbacks on the component loader
     if (!getenv("CitizenFX_ToolMode"))
     {
+		DisableToolHelpScope thScope;
+
         RunLifeCycleCallback([] (LifeCycleComponent* component)
         {
             component->PreInitGame();

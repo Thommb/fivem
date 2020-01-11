@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 
 namespace CitizenFX.Core
 {
@@ -86,7 +86,21 @@ namespace CitizenFX.Core
 		CarbineRifleMk2 = 0xFAD1F1C9,
 		CombatMGMk2 = 0xDBBD7280,
 		HeavySniperMk2 = 0xA914799,
-		SMGMk2 = 0x78A97CD0
+		SMGMk2 = 0x78A97CD0,
+		//mpchristmas2017
+        RevolverMk2 = 0xCB96392F,
+        SpecialCarbineMk2 = 0x969C3D67,
+        MarksmanRifleMk2 = 0x6A6C02E0,
+        PumpShotgunMk2 = 0x555AF99A,
+        SNSPistolMk2 = 0x88374054,
+        BullpupRifleMk2 = 0x84D6FAFD,
+        DoubleAction = 0x97EA20B8,
+        //mpbattle
+        StoneHatchet = 0x3813FC08,
+        //mpchristmas2018
+        RayPistol = 0xAF3696A1,
+        RayMinigun = 0xB62D1F67,
+        RayCarbine = 0x476BF155
 	}
 
 	public enum VehicleWeaponHash
@@ -103,5 +117,37 @@ namespace CitizenFX.Core
 		EnemyLaser = 1566990507,
 		SearchLight = -844344963,
 		Radar = -764006018
+	}
+
+	public enum AmmoType : uint
+	{
+		Melee = 0,
+		FireExtinguisher = 0x5106B43C,
+		Flare = 0x6BCCF76F,
+		FlareGun = 0x45F0E965,
+		PetrolCan = 0xCA6318A1,
+		Shotgun = 0x90083D3B,
+		Pistol = 0x743D4F54,
+		Ball = 0xFF956666,
+		Snowball = 0x8218416D,
+		Sniper = 0x4C98087B,
+		AssaultRifle = 0xD05319F,
+		SMG = 0x6C7D23B8,
+		Molotov = 0x5633F9D5,
+		StunGun = 0xB02EADE0,
+		MG = 0x6AA1343F,
+		GrenadeLauncher = 0x3BCCA5EE,
+		RPG = 0x67DD81F2,
+		Minigun = 0x9FC5C882,
+		Firework = 0xAF23EE0F,
+		Railgun = 0x794446FD,
+		HomingLauncher = 0x99150E2D,
+		Grenade = 0x3BD313B1,
+		StickyBomb = 0x5424B617,
+		ProximityMine = 0xAF2208A7,
+		PipeBomb = 0x155663F8,
+		SmokeGrenade = 0xE60E08A6,
+		BZGas = 0x9B747EA4,
+		RayPistol = 0xA50ABB74
 	}
 }

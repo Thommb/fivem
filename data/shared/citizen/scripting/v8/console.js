@@ -1,6 +1,7 @@
 // Global console
 
 (function (global) {
+    const monitorMode = (GetConvar('monitormode', 'false') == 'true') && IsDuplicityVersion();
     const percent = '%'.charCodeAt(0);
 
     const stringSpecifier = 's'.charCodeAt(0);
@@ -90,6 +91,12 @@
 
     function formatValue(arg) {
         switch (true) {
+            case arg === null:
+                return 'null';
+                
+            case arg === undefined:
+                return 'undefined'
+
             case arg instanceof WeakMap:
                 return 'WeakMap {}';
 
@@ -107,7 +114,16 @@
 
             case Array.isArray(arg):
             case arg.toString() === "[object Object]":
-                return JSON.stringify(arg, null, 2);
+                let cache = [];
+                let out = JSON.stringify(arg, (key, value) => {
+                    if (typeof value === 'object' && value !== null) {
+                        if (cache.indexOf(value) !== -1) return;
+                        cache.push(value);
+                    }
+                    return value;
+                }, 2);
+                cache = null;
+                return out;
 
             case arg.toString() === "[object Error]" || arg instanceof Error:
                 return arg.stack || Error.prototype.toString.call(arg);
@@ -201,7 +217,8 @@
             this._timers = new Map();
             this._counters = new Map();
 
-            this.log = this.log.bind(this);
+            // TODO: Improve the sync console output.
+            this.log = (monitorMode) ? this.logSync.bind(this) : this.log.bind(this);
             this.info = this.info.bind(this);
             this.warn = this.warn.bind(this);
             this.time = this.time.bind(this);
@@ -255,6 +272,10 @@
             this._trace(format(message, ...optionalParams));
         }
 
+        logSync(message = undefined, ...optionalParams) {
+            process.stdout.write(format(message, ...optionalParams) + "\n");
+        }
+
         debug(message = undefined, ...optionalParams) {
             this._trace('Debug: ' + format(message, ...optionalParams));
         }
@@ -264,11 +285,11 @@
         }
 
         warn(message = undefined, ...optionalParams) {
-            this._trace('Warning: ' + format(message, ...optionalParams));
+            this._trace('^3Warning: ' + format(message, ...optionalParams) + '^7');
         }
 
         error(message = undefined, ...optionalParams) {
-            this._trace('Error: ' + format(message, ...optionalParams));
+            this._trace('^1Error: ' + format(message, ...optionalParams) + '^7');
         }
 
         trace(message = undefined, ...optionalParams) {

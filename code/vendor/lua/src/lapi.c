@@ -28,7 +28,7 @@
 #include "ltm.h"
 #include "lundump.h"
 #include "lvm.h"
-
+#include "lauxlib.h"
 
 
 const char lua_ident[] =
@@ -57,7 +57,11 @@ const char lua_ident[] =
 	api_check(l, isstackindex(i, o), "index not in the stack")
 
 
-static TValue *index2addr (lua_State *L, int idx) {
+static
+#ifdef _MSC_VER
+__forceinline
+#endif
+	TValue *index2addr (lua_State *L, int idx) {
   CallInfo *ci = L->ci;
   if (idx > 0) {
     TValue *o = ci->func + idx;
@@ -241,12 +245,127 @@ LUA_API void lua_pushvalue (lua_State *L, int idx) {
   lua_unlock(L);
 }
 
+/*
+** get function functions, recursively
+*/
+static int lua_toprotos_recursive(lua_State* L, Proto* p) {
+  int np = 1;
+  LClosure* ncl = luaF_newLclosure(L, 0);
+  setclLvalue(L, L->top, ncl);  /* anchor it */
+  incr_top(L);
 
+  ncl->p = p;
+
+  for (int i = 0; i < p->sizep; i++) {
+    np += lua_toprotos_recursive(L, p->p[i]);
+  }
+
+  return np;
+}
+
+LUA_API int lua_toprotos (lua_State* L, int idx) {
+  StkId o = index2addr(L, idx);
+
+  if (ttisLclosure(o)) {
+    Proto* p = clLvalue(o)->p;
+
+    return lua_toprotos_recursive(L, p);
+  }
+
+  return 0;
+}
 
 /*
 ** access functions (stack -> C)
 */
 
+LUA_API TValue lua_getvalue(lua_State *L, int idx) {
+  StkId o = index2addr(L, idx);
+
+  return *o;
+}
+
+LUA_API int lua_valuetype(lua_State* L, TValue o) {
+  return (isvalid(&o) ? ttnov(&o) : LUA_TNONE);
+}
+
+LUA_API int lua_valueisinteger(lua_State* L, TValue o) {
+  return ttisinteger(&o);
+}
+
+LUA_API int lua_valueisfloat(lua_State* L, TValue o) {
+  return ttisfloat(&o);
+}
+
+LUA_API lua_Integer lua_valuetointeger(lua_State* L, TValue o) {
+  lua_Integer res;
+  int isnum = tointeger(&o, &res);
+  if (!isnum)
+    res = 0;  /* call to 'tointeger' may change 'n' even if it fails */
+  return res;
+}
+
+LUA_API lua_Number lua_valuetonumber(lua_State* L, TValue o) {
+  lua_Number res;
+  int isnum = tonumber(&o, &res);
+  if (!isnum)
+    res = 0;  /* call to 'tonumber' may change 'n' even if it fails */
+  return res;
+}
+
+LUA_API int lua_valuetoboolean(lua_State* L, TValue o) {
+  return !l_isfalse(&o);
+}
+
+LUA_API const char *lua_valuetostring (lua_State *L, TValue o) {
+  if (!ttisstring(&o)) {
+    return NULL;
+  }
+  return svalue(&o);
+}
+
+LUA_API lua_Float4 lua_valuetofloat4(lua_State* L, TValue o) {
+  return v4value(&o);
+}
+
+LUA_API void *lua_valuetouserdata (lua_State *L, TValue o) {
+  switch (ttnov(&o)) {
+    case LUA_TUSERDATA: return getudatamem(uvalue(&o));
+    case LUA_TLIGHTUSERDATA: return pvalue(&o);
+    default: return NULL;
+  }
+}
+
+LUA_API
+#ifdef _MSC_VER
+__forceinline
+#endif
+	lua_Integer lua_utointeger(lua_State* L, int idx) {
+  const TValue *val = L->ci->func + idx;
+  return val->value_.i;
+}
+
+LUA_API
+#ifdef _MSC_VER
+__forceinline
+#endif
+	lua_Number lua_utonumber(lua_State* L, int idx) {
+  //const TValue* val = index2addr(L, idx);
+  const TValue *val = L->ci->func + idx;
+  return val->value_.n;
+}
+
+LUA_API
+#ifdef _MSC_VER
+__forceinline
+#endif
+	int lua_asserttop(const lua_State* L, int idx) {
+
+  const TValue *o = L->ci->func + idx;
+  if (o >= L->top) return 0;
+
+  return 1;
+}
 
 LUA_API int lua_type (lua_State *L, int idx) {
   StkId o = index2addr(L, idx);
@@ -376,6 +495,19 @@ LUA_API lua_Number lua_tonumberx (lua_State *L, int idx, int *pisnum) {
   return n;
 }
 
+static int lua_vectyperror (lua_State *L, int arg, const char *tname) {
+  const char *msg;
+  const char *typearg;  /* name for the type of the actual argument */
+  if (luaL_getmetafield(L, arg, "__name") == LUA_TSTRING)
+    typearg = lua_tostring(L, -1);  /* use the given type name */
+  else if (lua_type(L, arg) == LUA_TLIGHTUSERDATA)
+    typearg = "light userdata";  /* special name for messages */
+  else
+    typearg = luaL_typename(L, arg);  /* standard name */
+  msg = lua_pushfstring(L, "%s expected, got %s", tname, typearg);
+  return luaL_argerror(L, arg, msg);
+}
+
 LUA_API void lua_checkvector2 (lua_State *L, int idx, float *x, float *y) {
   const TValue *o = index2addr(L, idx);
   if (ttisvector2(o)) {
@@ -383,7 +515,7 @@ LUA_API void lua_checkvector2 (lua_State *L, int idx, float *x, float *y) {
     *x = f4.x;
     *y = f4.y;
   } else {
-    luaG_runerror(L, "Not a vector2");
+    lua_vectyperror(L, idx, "vector2");
   }
 }
 
@@ -396,7 +528,7 @@ LUA_API void lua_checkvector3 (lua_State *L, int idx, float *x, float *y, float 
     *y = f4.y;
     *z = f4.z;
   } else {
-    luaG_runerror(L, "Not a vector3");
+    lua_vectyperror(L, idx, "vector3");
   }
 }
 
@@ -410,7 +542,7 @@ LUA_API void lua_checkvector4 (lua_State *L, int idx, float *x, float *y, float 
     *z = f4.z;
     *w = f4.w;
   } else {
-    luaG_runerror(L, "Not a vector4");
+    lua_vectyperror(L, idx, "vector4");
   }
 }
 
@@ -424,7 +556,7 @@ LUA_API void lua_checkquat (lua_State *L, int idx, float *w, float *x, float *y,
     *y = f4.y;
     *z = f4.z;
   } else {
-    luaG_runerror(L, "Not a quat");
+    lua_vectyperror(L, idx, "quat");
   }
 }
 
@@ -587,7 +719,7 @@ LUA_API void lua_pushquat (lua_State *L, float w, float x, float y, float z) {
   lua_unlock(L);
 }
 
-   
+
 LUA_API void lua_pushinteger (lua_State *L, lua_Integer n) {
   lua_lock(L);
   setivalue(L->top, n);
@@ -1393,14 +1525,14 @@ LUA_API void *lua_upvalueid (lua_State *L, int fidx, int n) {
 
 LUA_API void lua_upvaluejoin (lua_State *L, int fidx1, int n1,
                                             int fidx2, int n2) {
-  LClosure *f1;
-  UpVal **up1 = getupvalref(L, fidx1, n1, &f1);
+  UpVal **up1 = getupvalref(L, fidx1, n1, NULL); /* the last parameter not needed */
   UpVal **up2 = getupvalref(L, fidx2, n2, NULL);
+  if (*up1 == *up2) return; /* Already joined */
+  (*up2)->refcount++;
+  if (upisopen(*up2)) (*up2)->u.open.touched = 1;
+  luaC_upvalbarrier(L, *up2);
   luaC_upvdeccount(L, *up1);
   *up1 = *up2;
-  (*up1)->refcount++;
-  if (upisopen(*up1)) (*up1)->u.open.touched = 1;
-  luaC_upvalbarrier(L, *up1);
 }
 
 

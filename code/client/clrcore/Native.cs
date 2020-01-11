@@ -16,25 +16,24 @@ namespace CitizenFX.Core.Native
             InvokeInternal(hash, typeof(void), arguments);
         }
 
-        private static object InvokeInternal(Hash nativeHash, Type returnType, InputArgument[] args)
-        {
-            using (var scriptContext = new ScriptContext())
-            {
-                foreach (var arg in args)
-                {
-                    scriptContext.Push(arg.Value);
-                }
+		private static object InvokeInternal(Hash nativeHash, Type returnType, InputArgument[] args)
+		{
+			ScriptContext.Reset();
 
-                scriptContext.Invoke((ulong)nativeHash, InternalManager.ScriptHost);
+			foreach (var arg in args)
+			{
+				ScriptContext.Push(arg.Value);
+			}
 
-                if (returnType != typeof(void))
-                {
-                    return scriptContext.GetResult(returnType);
-                }
+			ScriptContext.Invoke((ulong)nativeHash, InternalManager.ScriptHost);
 
-                return null;
-            }
-        }
+			if (returnType != typeof(void))
+			{
+				return ScriptContext.GetResult(returnType);
+			}
+
+			return null;
+		}
     }
 
 	[StructLayout(LayoutKind.Explicit)]
@@ -48,6 +47,11 @@ namespace CitizenFX.Core.Native
 
 		[FieldOffset(16)]
 		public float Z;
+
+		public static implicit operator NativeVector3(Vector3 v)
+		{
+			return new NativeVector3() { X = v.X, Y = v.Y, Z = v.Z };
+		}
 
         public static implicit operator Vector3(NativeVector3 self)
         {
@@ -418,10 +422,19 @@ namespace CitizenFX.Core.Native
 		[SecuritySafeCritical]
 		public T GetResult<T>()
 		{
+			return GetResultInternal<T>();
+		}
+
+		[SecurityCritical]
+		private unsafe T GetResultInternal<T>()
+		{
 			var data = new byte[24];
 			Marshal.Copy(m_dataPtr, data, 0, 24);
 
-			return (T)ScriptContext.GetResult(typeof(T), data);
+			fixed (byte* dataPtr = data)
+			{
+				return (T)ScriptContext.GetResult(typeof(T), dataPtr);
+			}
 		}
 
 		[SecuritySafeCritical]

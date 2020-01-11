@@ -7,6 +7,7 @@
 
 #include "StdInc.h"
 
+#ifndef IS_FXSERVER
 #include "Hooking.Patterns.h"
 
 #include <windows.h>
@@ -60,9 +61,22 @@ typedef basic_fnv_1<fnv_prime, fnv_offset_basis> fnv_1;
 
 namespace hook
 {
-#if PATTERNS_USE_HINTS
-	static std::multimap<uint64_t, uintptr_t> g_hints;
-#endif
+	inline std::multimap<uint64_t, uintptr_t>& GetHints()
+	{
+		static struct RefSource
+		{
+			RefSource()
+			{
+				auto func = (decltype(hints)(*)())GetProcAddress(GetModuleHandle(L"CoreRT.dll"), "CoreGetPatternHints");
+
+				this->hints = func();
+			}
+
+			std::multimap<uint64_t, uintptr_t>* hints;
+		} hintsRef;
+
+		return *hintsRef.hints;
+	}
 
 	static void TransformPattern(std::string_view pattern, std::string& data, std::string& mask)
 	{
@@ -153,13 +167,13 @@ namespace hook
 		// if there's hints, try those first
 		if (m_module == GetModuleHandle(nullptr))
 		{
-			auto range = g_hints.equal_range(m_hash);
+			auto range = GetHints().equal_range(m_hash);
 
 			if (range.first != range.second)
 			{
 				std::for_each(range.first, range.second, [&](const std::pair<uint64_t, uintptr_t>& hint)
 				{
-					ConsiderMatch(hint.second);
+					ConsiderMatch(hook::get_adjusted(hint.second));
 				});
 
 				// if the hints succeeded, we don't need to do anything more
@@ -186,8 +200,8 @@ namespace hook
 		auto matchSuccess = [&](uintptr_t address)
 		{
 #if PATTERNS_USE_HINTS
-			g_hints.emplace(m_hash, address);
-			Citizen_PatternSaveHint(m_hash, address);
+			GetHints().emplace(m_hash, hook::get_unadjusted(address));
+			Citizen_PatternSaveHint(m_hash, hook::get_unadjusted(address));
 #else
 			(void)address;
 #endif
@@ -263,7 +277,7 @@ namespace hook
 #if PATTERNS_USE_HINTS
 	void pattern::hint(uint64_t hash, uintptr_t address)
 	{
-		auto range = g_hints.equal_range(hash);
+		auto range = GetHints().equal_range(hash);
 
 		for (auto it = range.first; it != range.second; it++)
 		{
@@ -273,29 +287,8 @@ namespace hook
 			}
 		}
 
-		g_hints.emplace(hash, address);
+		GetHints().emplace(hash, address);
 	}
 #endif
 }
-
-static InitFunction initFunction([] ()
-{
-	std::wstring hintsFile = MakeRelativeCitPath(L"citizen\\hints.dat");
-	FILE* hints = _wfopen(hintsFile.c_str(), L"rb");
-	
-	if (hints)
-	{
-		while (!feof(hints))
-		{
-			uint64_t hash;
-			uintptr_t hint;
-
-			fread(&hash, 1, sizeof(hash), hints);
-			fread(&hint, 1, sizeof(hint), hints);
-
-			hook::pattern::hint(hash, hint);
-		}
-
-		fclose(hints);
-	}
-});
+#endif

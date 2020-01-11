@@ -7,78 +7,103 @@ using System.Threading.Tasks;
 using System.Security;
 using System.Runtime.InteropServices;
 
+using static CitizenFX.Core.Native.API;
+
 namespace CitizenFX.Core
 {
-    class RemoteFunctionReference : IDisposable
-    {
-        private readonly string m_reference;
+	class RemoteFunctionReference : IDisposable
+	{
+		private readonly string m_reference;
 
-        public RemoteFunctionReference(byte[] reference)
-        {
-            m_reference = Encoding.UTF8.GetString(reference);
-        }
+		public RemoteFunctionReference(byte[] reference)
+		{
+			m_reference = Encoding.UTF8.GetString(reference);
 
-        private bool m_disposed = false;
+			// increment the refcount
+			DuplicateFunctionReference(m_reference);
+		}
 
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
+		~RemoteFunctionReference()
+		{
+			Dispose(false);
+		}
 
-        protected virtual void Dispose(bool disposing)
-        {
-            if (m_disposed)
-            {
-                return;
-            }
+		private bool m_disposed = false;
 
-            if (disposing)
-            {
-                // no managed objects to free
-            }
+		public void Dispose()
+		{
+			Dispose(true);
+			GC.SuppressFinalize(this);
+		}
 
-            FreeNativeReference();
+		protected virtual void Dispose(bool disposing)
+		{
+			if (m_disposed)
+			{
+				return;
+			}
 
-            m_disposed = true;
-        }
+			if (disposing)
+			{
+				// no managed objects to free
+			}
 
-        private void FreeNativeReference()
-        {
-            Native.Function.Call(Native.Hash.DELETE_FUNCTION_REFERENCE, m_reference);
-        }
+			FreeNativeReference();
 
-        public byte[] Duplicate()
-        {
-            return Encoding.UTF8.GetBytes(Native.Function.Call<string>(Native.Hash.DUPLICATE_FUNCTION_REFERENCE, m_reference));
-        }
+			m_disposed = true;
+		}
 
-        [SecuritySafeCritical]
-        public byte[] InvokeNative(byte[] argsSerialized)
-        {
-            return _InvokeNative(argsSerialized);
-        }
+		private void FreeNativeReference()
+		{
+			lock (ScriptContext.Lock)
+			{
+				DeleteFunctionReference(m_reference);
+			}
+		}
 
-        [SecurityCritical]
-        private byte[] _InvokeNative(byte[] argsSerialized)
-        {
-	        IntPtr resBytes;
-            long retLength;
+		public byte[] Duplicate()
+		{
+			return Encoding.UTF8.GetBytes(DuplicateFunctionReference(m_reference));
+		}
 
-            unsafe
-            {
-                fixed (byte* argsSerializedRef = &argsSerialized[0])
-                {
-                    resBytes = Native.Function.Call<IntPtr>(Native.Hash.INVOKE_FUNCTION_REFERENCE, m_reference, argsSerializedRef, argsSerialized.Length, &retLength);
-                }
-            }
+		[SecuritySafeCritical]
+		public byte[] InvokeNative(byte[] argsSerialized)
+		{
+			return _InvokeNative(argsSerialized);
+		}
 
-            var retval = new byte[retLength];
-            Marshal.Copy(resBytes, retval, 0, retval.Length);
+		[SecurityCritical]
+		private byte[] _InvokeNative(byte[] argsSerialized)
+		{
+			if (GameInterface.SnapshotStackBoundary(out var b))
+			{
+				InternalManager.ScriptHost.SubmitBoundaryEnd(b, b.Length);
+			}
 
-            return retval;
-        }
-    }
+			try
+			{
+				IntPtr resBytes;
+				long retLength;
+
+				unsafe
+				{
+					fixed (byte* argsSerializedRef = &argsSerialized[0])
+					{
+						resBytes = Native.Function.Call<IntPtr>(Native.Hash.INVOKE_FUNCTION_REFERENCE, m_reference, argsSerializedRef, argsSerialized.Length, &retLength);
+					}
+				}
+
+				var retval = new byte[retLength];
+				Marshal.Copy(resBytes, retval, 0, retval.Length);
+
+				return retval;
+			}
+			finally
+			{
+				InternalManager.ScriptHost.SubmitBoundaryEnd(null, 0);
+			}
+		}
+	}
 
 	class NetworkFunctionManager
 	{

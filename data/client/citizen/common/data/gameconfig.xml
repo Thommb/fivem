@@ -12,6 +12,10 @@
 					<Entries>
 						<!-- Keep these sorted -->
 						<Item>
+							<PoolName>CNonPhysicalPlayerData</PoolName>
+							<PoolSize value="512"/>
+						</Item>
+						<Item>
 							<PoolName>CPlayerInfo</PoolName>
 							<PoolSize value="256"/>
 						</Item>
@@ -20,8 +24,24 @@
 							<PoolSize value="256"/>
 						</Item>
 						<Item>
+							<PoolName>CNetworkDamageTracker</PoolName>
+							<PoolSize value="256"/>
+						</Item>
+						<Item>
+							<PoolName>CNetObjPed</PoolName>
+							<PoolSize value="238"/> <!-- 110 + player count -->
+						</Item>
+						<Item>
+							<PoolName>CNetBlenderPed</PoolName>
+							<PoolSize value="238"/> <!-- 110 + player count -->
+						</Item>
+						<Item>
 							<PoolName>CNetObjPed::CNetTennisMotionData</PoolName>
 							<PoolSize value="256"/>
+						</Item>
+						<Item>
+							<PoolName>TaskSequenceInfo</PoolName>
+							<PoolSize value="2400"/>
 						</Item>
 						<Item>
 							<PoolName>AnimatedBuilding</PoolName>
@@ -45,19 +65,19 @@
 						</Item>
 						<Item>
 							<PoolName>StreamPed req data</PoolName>
-							<PoolSize value="90"/>
+							<PoolSize value="180"/>
 						</Item>
 						<Item>
 							<PoolName>StreamPed render data</PoolName>
-							<PoolSize value="200"/>
+							<PoolSize value="400"/>
 						</Item>
 						<Item>
 							<PoolName>PedProp req data</PoolName>
-							<PoolSize value="100"/>
+							<PoolSize value="200"/>
 						</Item>
 						<Item>
 							<PoolName>PedProp render data</PoolName>
-							<PoolSize value="240"/>
+							<PoolSize value="480"/>
 						</Item>
 						<Item>
 							<!-- Size of CVehicleRecordingMgr's streaming module. -->
@@ -110,11 +130,11 @@
 						</Item>
 						<Item>
 							<PoolName>AnimStore</PoolName>
-							<PoolSize value="13900"/>
+							<PoolSize value="14700"/>
 						</Item>
 						<Item>
 							<PoolName>CGameScriptResource</PoolName>
-							<PoolSize value="3015"/>
+							<PoolSize value="3051"/>
 						</Item>
 						<Item>
 							<PoolName>CGameScriptHandlerNetwork</PoolName>
@@ -214,7 +234,11 @@
 						</Item>
 						<Item>
 							<PoolName>DecoratorExtension</PoolName>
-							<PoolSize value="1000"/>
+							<PoolSize value="1500"/>
+						</Item>
+						<Item>
+							<PoolName>Decorator</PoolName>
+							<PoolSize value="1500"/>
 						</Item>
 						<Item>
 							<PoolName>DrawableStore</PoolName>
@@ -294,11 +318,11 @@
 						</Item>
 						<Item>
 							<PoolName>MapDataLoadedNode</PoolName>
-							<PoolSize value="1000"/>
+							<PoolSize value="1100"/>
 						</Item>
 						<Item>
 							<PoolName>MapDataStore</PoolName>
-							<PoolSize value="10000"/>
+							<PoolSize value="11000"/>
 						</Item>
 						<Item>
 							<PoolName>MapTypesStore</PoolName>
@@ -346,6 +370,10 @@
 						</Item>
 						<Item>
 							<PoolName>CWeapon</PoolName>
+							<PoolSize value="1024"/>
+						</Item>
+						<Item>
+							<PoolName>CWeaponComponentInfo</PoolName>
 							<PoolSize value="1024"/>
 						</Item>
 						<Item>
@@ -568,7 +596,7 @@
 						</Item>
 						<Item>
 							<PoolName>SyncedScenes</PoolName>
-							<PoolSize value="48"/>
+							<PoolSize value="50"/>
 						</Item>
 						<Item>
 						  <PoolName>AnimScenes</PoolName>
@@ -838,10 +866,10 @@
 					<MaxMloModelInfos value="220"/>
 					<MaxPedModelInfos value="825"/>
 					<MaxTimeModelInfos value="1800"/>
-					<MaxVehicleModelInfos value="620"/>
+					<MaxVehicleModelInfos value="1024"/>
 					<MaxWeaponModelInfos value="115"/>
 					<MaxExtraPedModelInfos value="1024"/>
-					<MaxExtraVehicleModelInfos value="1024"/>
+					<MaxExtraVehicleModelInfos value="2048"/>
 					<MaxExtraWeaponModelInfos value="1024"/>
 				</ConfigModelInfo>
 
@@ -892,6 +920,7 @@
 					<SteamAppId value="271590"/>
 					<TitleDirectoryName>GTA V</TitleDirectoryName>
 					<MultiplayerSessionTemplateName>SsnTemplateOpen</MultiplayerSessionTemplateName>
+					<ScAuthTitleId>gtav</ScAuthTitleId>
 				</ConfigOnlineServices>
 
 				<ConfigUGCDescriptions>
@@ -1021,7 +1050,7 @@
 						</Item>
 						<Item>
 							<StackName>DEFAULT</StackName>
-							<SizeOfStack value="1624"/>
+							<SizeOfStack value="1424"/>
 							<NumberOfStacksOfThisSize value="68"/>
 						</Item>
 						<Item>
@@ -1046,12 +1075,12 @@
 						</Item>
 						<Item>
 							<StackName>VEHICLE_SPAWN</StackName>
-							<SizeOfStack value="3068"/>
+							<SizeOfStack value="3368"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>CAR_MOD_SHOP</StackName>
-							<SizeOfStack value="3072"/>
+							<SizeOfStack value="3472"/>
 							<NumberOfStacksOfThisSize value="2"/>
 						</Item>
 						<Item>
@@ -1060,9 +1089,9 @@
 							<NumberOfStacksOfThisSize value="2"/>
 						</Item>
 						<Item>
-						  <StackName>APP_INTERNET</StackName>
-						  <SizeOfStack value="4592"/>
-						  <NumberOfStacksOfThisSize value="1"/>
+							<StackName>APP_INTERNET</StackName>
+							<SizeOfStack value="4592"/>
+							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>MULTIPLAYER_MISSION</StackName>
@@ -1075,9 +1104,9 @@
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
-						  <StackName>INTERACTION_MENU</StackName>
-						  <SizeOfStack value="9800"/>
-						  <NumberOfStacksOfThisSize value="1"/>
+							<StackName>INTERACTION_MENU</StackName>
+							<SizeOfStack value="9800"/>
+							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>SCRIPT_XML</StackName>
@@ -1101,12 +1130,17 @@
 						</Item>
 						<Item>
 							<StackName>WAREHOUSE</StackName>
-							<SizeOfStack value="10820"/>
+							<SizeOfStack value="14000"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>IE_DELIVERY</StackName>
 							<SizeOfStack value="2024"/>
+							<NumberOfStacksOfThisSize value="1"/>
+						</Item>
+						<Item>
+							<StackName>SHOP_CONTROLLER</StackName>
+							<SizeOfStack value="2200"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
@@ -1126,26 +1160,24 @@
 						</Item>
 						<Item>
 							<StackName>FMMC_LAUNCHER</StackName>
-							<SizeOfStack value="15000"/>
+							<SizeOfStack value="16000"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>MULTIPLAYER_FREEMODE</StackName>
-							<SizeOfStack value="41000"/>
+							<SizeOfStack value="55000"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>MISSION</StackName>
-							<SizeOfStack value="20500"/>
+							<SizeOfStack value="25000"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
 						<Item>
 							<StackName>MP_LAUNCH_SCRIPT</StackName>
-							<SizeOfStack value="21768"/>
+							<SizeOfStack value="22500"/>
 							<NumberOfStacksOfThisSize value="1"/>
 						</Item>
-
-
 					</StackSizeData>
 				</ConfigScriptStackSizes>
 

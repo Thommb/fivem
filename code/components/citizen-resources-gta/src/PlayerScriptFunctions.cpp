@@ -6,12 +6,13 @@
  */
 
 #include <StdInc.h>
+
 #include <ScriptEngine.h>
 #include <NetworkPlayerMgr.h>
 
-static inline int GetServerId(const ScPlayerData* platformData)
+static inline int GetServerId(const rlGamerInfo& platformData)
 {
-	return (platformData->addr.ipLan & 0xFFFF) ^ 0xFEED;
+	return (platformData.peerAddress.localAddr.ip.addr & 0xFFFF) ^ 0xFEED;
 }
 
 static InitFunction initFunction([] ()
@@ -20,15 +21,15 @@ static InitFunction initFunction([] ()
 	{
 		int serverId = context.GetArgument<int>(0);
 
-		for (int i = 0; i < 32; i++)
+		for (int i = 0; i < 256; i++)
 		{
 			CNetGamePlayer* player = CNetworkPlayerMgr::GetPlayer(i);
 
 			if (player)
 			{
-				auto platformData = player->GetPlatformPlayerData();
+				auto platformData = player->GetGamerInfo();
 				
-				if (GetServerId(platformData) == serverId)
+				if (GetServerId(*platformData) == serverId)
 				{
 					context.SetResult(i);
 					return;
@@ -47,7 +48,7 @@ static InitFunction initFunction([] ()
 
 		if (player)
 		{
-			context.SetResult(GetServerId(player->GetPlatformPlayerData()));
+			context.SetResult(GetServerId(*player->GetGamerInfo()));
 		}
 		else
 		{

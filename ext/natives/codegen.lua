@@ -278,7 +278,7 @@ function rpcEnvironment.entity_rpc(nativeName)
 	codeEnvironment.native(nativeName)
 		codeEnvironment.arguments(n.arguments)
 		codeEnvironment.apiset('server')
-		codeEnvironment.returns('void')
+		codeEnvironment.returns('Entity')
 
 		if n.doc then
 			codeEnvironment.doc(n.doc)
@@ -299,6 +299,10 @@ function loadRpcDefinition(filename)
 end
 
 function trim(s)
+	if not s then
+		return nil
+	end
+
 	return s:gsub("^%s*(.-)%s*$", "%1")
 end
 
@@ -310,12 +314,14 @@ function parseDocString(native)
 	end
 
 	local summary = trim(docString:match("<summary>(.+)</summary>"))
-	local params = docString:gmatch("<param name=\"([^\"]+)\">([^<]+)</param>")
+	local params = docString:gmatch("<param name=\"([^\"]+)\">([^<]*)</param>")
 	local returns = docString:match("<returns>(.+)</returns>")
 
 	if not summary then
 		return nil
 	end
+	
+	summary = trim(summary:gsub('^```(.+)```$', '%1'))
 
 	local paramsData = {}
 	local hasParams = false
@@ -354,9 +360,22 @@ end
 loadDefinition 'codegen_types.lua'
 
 local outputType = 'lua'
+local globalNatives = false
 
 if #arg > 0 then
+	if arg[1]:match('gta_universal') then
+		arg[1] = 'inp/natives_global.lua'
+	end
+	
+	if arg[1]:match('rdr3_universal') then
+		arg[1] = 'inp/natives_rdr3.lua'
+	end
+	
 	loadDefinition(arg[1])
+	
+	if arg[1]:match('natives_global') or arg[1]:match('natives_rdr3') then
+		globalNatives = true
+	end
 
 	gApiSet = 'client'
 end
@@ -369,8 +388,11 @@ if #arg > 2 then
 	gApiSet = arg[3]
 end
 
-loadDefinition 'codegen_cfx_natives.lua'
-loadDefinition 'codegen_dlc_natives.lua'
+if not globalNatives then
+	loadDefinition 'inp/natives_cfx.lua'
+	loadDefinition 'codegen_dlc_natives.lua'
+end
+
 loadRpcDefinition 'rpc_spec_natives.lua'
 
 _natives = {}

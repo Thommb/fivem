@@ -14,6 +14,8 @@
 #include <CfxState.h>
 #include <HostSharedData.h>
 
+#include <Error.h>
+
 fwPlatformString GetAbsoluteCitPath()
 {
 	static fwPlatformString citizenPath;
@@ -23,13 +25,18 @@ fwPlatformString GetAbsoluteCitPath()
 #ifndef IS_FXSERVER
 		static HostSharedData<CfxState> initState("CfxInitState");
 
-		citizenPath = initState->initPath;
+		citizenPath = initState->GetInitPath();
 
 		// is this a new install, if so, migrate to subdirectory-based Citizen
+		if (initState->ranPastInstaller)
 		{
 			if (GetFileAttributes((citizenPath + L"CoreRT.dll").c_str()) == INVALID_FILE_ATTRIBUTES)
 			{
+#ifdef IS_RDR3
+				if (!CreateDirectory((citizenPath + L"RedM.app").c_str(), nullptr))
+#else
 				if (!CreateDirectory((citizenPath + L"FiveM.app").c_str(), nullptr))
+#endif
 				{
 					DWORD error = GetLastError();
 
@@ -43,7 +50,12 @@ fwPlatformString GetAbsoluteCitPath()
 
 		// is this subdirectory-based Citizen? if so, append the subdirectory
 		{
-			std::wstring subPath = citizenPath + L"FiveM.app";
+			std::wstring subPath = citizenPath +
+#ifdef IS_RDR3
+				L"RedM.app";
+#else
+				L"FiveM.app";
+#endif
 
 			if (GetFileAttributes(subPath.c_str()) != INVALID_FILE_ATTRIBUTES)
 			{
@@ -189,13 +201,13 @@ void SetThreadName(int dwThreadID, const char* threadName)
 		memcpy(record.ExceptionInformation, &info, sizeof(info));
 		record.ExceptionRecord = &record;
 
-		DoNtRaiseException(&record);			
+		DoNtRaiseException(&record);
 	}
 }
 
-void AddCrashometry(const std::string& key, const std::string& format, const fmt::ArgList& value)
+void AddCrashometryV(const std::string& key, const std::string& format, fmt::printf_args value)
 {
-	std::string formatted = fmt::sprintf(format, value);
+	std::string formatted = fmt::vsprintf(format, value);
 
 	FILE* f = _wfopen(MakeRelativeCitPath(L"cache\\crashometry").c_str(), L"ab");
 
@@ -213,3 +225,22 @@ void AddCrashometry(const std::string& key, const std::string& format, const fmt
 		fclose(f);
 	}
 }
+
+#if !defined(COMPILING_SHARED_LIBC)
+void __cdecl _wwassert(
+	_In_z_ wchar_t const* _Message,
+	_In_z_ wchar_t const* _File,
+	_In_   unsigned       _Line
+)
+{
+	FatalErrorNoExcept("Assertion failure: %s (%s:%d)", ToNarrow(_Message), ToNarrow(_File), _Line);
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+	DWORD oldProtect;
+	VirtualProtect(_ReturnAddress(), 1, PAGE_EXECUTE_READWRITE, &oldProtect);
+	*(uint8_t*)_ReturnAddress() = 0xCC;
+#else
+#error No architecture for asserts?
+#endif
+}
+#endif

@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <mutex>
+#include <utf8.h>
 #include "Error.h"
 
 static STATIC InitFunctionBase* g_initFunctions;
@@ -55,8 +56,8 @@ void InitFunctionBase::RunAll()
 #define BUFFER_COUNT 8
 #define BUFFER_LENGTH 32768
 
-template<typename CharType>
-inline const CharType* va_impl(const CharType* string, const fmt::ArgList& formatList)
+template<typename CharType, typename TArgs>
+inline const CharType* va_impl(std::basic_string_view<CharType> string, const TArgs& formatList)
 {
 	static thread_local int currentBuffer;
 	static thread_local std::vector<CharType> buffer;
@@ -68,7 +69,7 @@ inline const CharType* va_impl(const CharType* string, const fmt::ArgList& forma
 
 	int thisBuffer = currentBuffer;
 
-	auto formatted = fmt::sprintf(string, formatList);
+	auto formatted = fmt::vsprintf(string, formatList);
 
 	if (formatted.length() >= BUFFER_LENGTH)
 	{
@@ -82,12 +83,12 @@ inline const CharType* va_impl(const CharType* string, const fmt::ArgList& forma
 	return &buffer[thisBuffer * BUFFER_LENGTH];
 }
 
-const char* va(const char* string, const fmt::ArgList& formatList)
+const char* vva(std::string_view string, fmt::printf_args formatList)
 {
 	return va_impl(string, formatList);
 }
 
-const wchar_t* va(const wchar_t* string, const fmt::ArgList& formatList)
+const wchar_t* vva(std::wstring_view string, fmt::wprintf_args formatList)
 {
 	return va_impl(string, formatList);
 }
@@ -118,110 +119,11 @@ void DoNtRaiseException(EXCEPTION_RECORD* record)
 	}
 }
 
-struct SharedTickCount
-{
-	struct Data
-	{
-		uint64_t tickCount;
-
-		Data()
-		{
-			tickCount = GetTickCount64();
-		}
-	};
-
-	SharedTickCount()
-	{
-		m_data = &m_fakeData;
-
-		bool initTime = true;
-		m_fileMapping = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(Data), L"CFX_SharedTickCount");
-
-		if (m_fileMapping != nullptr)
-		{
-			if (GetLastError() == ERROR_ALREADY_EXISTS)
-			{
-				initTime = false;
-			}
-
-			m_data = (Data*)MapViewOfFile(m_fileMapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(Data));
-
-			if (initTime)
-			{
-				m_data = new(m_data) Data();
-			}
-		}
-	}
-
-	inline Data& operator*()
-	{
-		return *m_data;
-	}
-
-	inline Data* operator->()
-	{
-		return m_data;
-	}
-
-private:
-	HANDLE m_fileMapping;
-	Data* m_data;
-
-	Data m_fakeData;
-};
-
-static void PerformFileLog(const char* string)
-{
-	static std::vector<char> lineBuffer(8192);
-	static size_t lineIndex;
-	static std::mutex logMutex;
-
-	static SharedTickCount initTickCount;
-
-	{
-		std::unique_lock<std::mutex> lock(logMutex);
-
-		for (const char* p = string; *p; ++p)
-		{
-			if (*p == '\n')
-			{
-				// flush the line
-				FILE* logFile = _wfopen(MakeRelativeCitPath(L"CitizenFX.log").c_str(), L"ab");
-
-				if (logFile)
-				{
-					// null-terminate the string
-					lineBuffer[lineIndex] = '\0';
-
-					fprintf(logFile, "[%10lld] %s\r\n", GetTickCount64() - initTickCount->tickCount, lineBuffer.data());
-					fclose(logFile);
-				}
-
-				// clear the line
-				lineIndex = 0;
-
-				// skip this char
-				continue;
-			}
-
-			// append the character
-			lineBuffer[lineIndex] = *p;
-			++lineIndex;
-
-			// overflow? if so, resize
-			if (lineIndex >= (lineBuffer.size() - 1))
-			{
-				lineBuffer.resize(lineBuffer.size() * 2);
-			}
-		}
-	}
-}
-
 static void RaiseDebugException(const char* buffer, size_t length)
 {
 	__try
 	{
-		/*EXCEPTION_RECORD record;
+		EXCEPTION_RECORD record;
 		record.ExceptionAddress = reinterpret_cast<PVOID>(_ReturnAddress());
 		record.ExceptionCode = DBG_PRINTEXCEPTION_C;
 		record.ExceptionFlags = 0;
@@ -230,7 +132,7 @@ static void RaiseDebugException(const char* buffer, size_t length)
 		record.ExceptionInformation[1] = reinterpret_cast<ULONG_PTR>(buffer);
 		record.ExceptionRecord = &record;
 
-		DoNtRaiseException(&record);*/
+		DoNtRaiseException(&record);
 	}
 	__except (EXCEPTION_EXECUTE_HANDLER)
 	{
@@ -239,17 +141,39 @@ static void RaiseDebugException(const char* buffer, size_t length)
 }
 #endif
 
-void TraceReal(const char* channel, const char* func, const char* file, int line, const char* string, const fmt::ArgList& formatList)
+#if defined(_WIN32) && !defined(IS_FXSERVER)
+inline void AsyncTrace(const char* string)
+{
+	using TCoreTraceFunc = decltype(&AsyncTrace);
+
+	static TCoreTraceFunc func;
+
+	if (!func)
+	{
+		func = (TCoreTraceFunc)GetProcAddress(GetModuleHandle(NULL), "AsyncTrace");
+
+		if (!func)
+		{
+			// try getting function proxy from CoreRT, could be we've already loaded a game
+			func = (TCoreTraceFunc)GetProcAddress(GetModuleHandle(L"CoreRT.dll"), "AsyncTrace");
+		}
+	}
+
+	(func) ? func(string) : (void)0;
+}
+#endif
+
+void TraceRealV(const char* channel, const char* func, const char* file, int line, std::string_view string, fmt::printf_args formatList)
 {
 	std::string buffer;
 
 	try
 	{
-		buffer = fmt::sprintf(string, formatList);
+		buffer = fmt::vsprintf(string, formatList);
 	}
-	catch (fmt::FormatError& e)
+	catch (fmt::format_error& e)
 	{
-		buffer = fmt::sprintf("fmt::FormatError while formatting %s: %s\n", string, e.what());
+		buffer = fmt::sprintf("fmt::format_error while formatting %s: %s\n", string, e.what());
 	}
 
 	CoreTrace(channel, func, file, line, buffer.data());
@@ -276,7 +200,9 @@ void TraceReal(const char* channel, const char* func, const char* file, int line
 		OutputDebugStringA(buffer.c_str());
 	}
 
-	PerformFileLog(buffer.c_str());
+#ifndef IS_FXSERVER
+	AsyncTrace(buffer.data());
+#endif
 #endif
 }
 
@@ -347,12 +273,41 @@ bool UrlDecode(const std::string& in, std::string& out)
 
 std::string ToNarrow(const std::wstring& wide)
 {
-	static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> g_converter;
-	return g_converter.to_bytes(wide);
+	// TODO: replace with something faster if needed
+	std::vector<char> outVec;
+	outVec.reserve(wide.size());
+
+#ifdef _WIN32
+	utf8::utf16to8(wide.begin(), wide.end(), std::back_inserter(outVec));
+#else
+	utf8::utf32to8(wide.begin(), wide.end(), std::back_inserter(outVec));
+#endif
+	
+	return std::string(outVec.begin(), outVec.end());
 }
 
 std::wstring ToWide(const std::string& narrow)
 {
-	static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> g_converter;
-	return g_converter.from_bytes(narrow);
+	std::vector<uint8_t> cleanVec;
+	cleanVec.reserve(narrow.size());
+
+	std::vector<wchar_t> outVec;
+	outVec.reserve(cleanVec.size());
+
+	try
+	{
+		utf8::replace_invalid(narrow.begin(), narrow.end(), std::back_inserter(cleanVec));
+
+#ifdef _WIN32
+		utf8::utf8to16(cleanVec.begin(), cleanVec.end(), std::back_inserter(outVec));
+#else
+		utf8::utf8to32(cleanVec.begin(), cleanVec.end(), std::back_inserter(outVec));
+#endif
+	}
+	catch (utf8::exception& e)
+	{
+
+	}
+
+	return std::wstring(outVec.begin(), outVec.end());
 }

@@ -15,75 +15,7 @@
 #include <VFSManager.h>
 #include <HttpClient.h>
 
-struct IgnoreCaseLess
-{
-	inline bool operator()(const std::string& left, const std::string& right) const
-	{
-		return _stricmp(left.c_str(), right.c_str()) < 0;
-	}
-};
-
-class
-#ifdef COMPILING_CITIZEN_RESOURCES_CLIENT
-	DLL_EXPORT
-#endif
-	ResourceCacheEntryList : public fwRefCountable, public fx::IAttached<fx::Resource>
-{
-public:
-	struct Entry
-	{
-		std::string resourceName;
-		std::string basename;
-		std::string remoteUrl;
-		std::string referenceHash;
-		size_t size;
-		std::map<std::string, std::string> extData;
-
-		inline Entry()
-		{
-
-		}
-
-		inline Entry(const std::string& resourceName, const std::string& basename, const std::string& remoteUrl, const std::string& referenceHash, size_t size, const std::map<std::string, std::string>& extData = {})
-			: resourceName(resourceName), basename(basename), remoteUrl(remoteUrl), referenceHash(referenceHash), size(size), extData(extData)
-		{
-
-		}
-	};
-
-private:
-	fx::Resource* m_parentResource;
-
-	std::map<std::string, Entry, IgnoreCaseLess> m_entries;
-
-public:
-	virtual void AttachToObject(fx::Resource* resource) override;
-
-	inline const std::map<std::string, Entry, IgnoreCaseLess>& GetEntries()
-	{
-		return m_entries;
-	}
-
-	inline boost::optional<Entry> GetEntry(const std::string& baseName)
-	{
-		auto it = m_entries.find(baseName);
-
-		if (it == m_entries.end())
-		{
-			return boost::optional<Entry>();
-		}
-
-		return boost::optional<Entry>(it->second);
-	}
-
-	inline void AddEntry(const Entry& entry)
-	{
-		m_entries[entry.basename] = entry;
-		m_entries[entry.basename].resourceName = m_parentResource->GetName();
-	}
-};
-
-DECLARE_INSTANCE_TYPE(ResourceCacheEntryList);
+#include <ExtDownloader.h>
 
 class
 #ifdef COMPILING_CITIZEN_RESOURCES_CLIENT
@@ -147,6 +79,11 @@ protected:
 		HttpRequestPtr getRequest;
 		std::shared_ptr<FileData> fileData;
 
+		std::string extHandle;
+
+		std::string localPath;
+		std::string fileName;
+
 		inline HandleData()
 			: parentHandle(vfs::Device::InvalidHandle), downloadProgress(0), downloadSize(0), allocated(false)
 		{
@@ -161,6 +98,8 @@ protected:
 
 	HttpClient* m_httpClient;
 
+	std::shared_ptr<ExtDownloader> m_extDownloader;
+
 	HandleData m_handles[512];
 
 	std::mutex m_handleLock;
@@ -169,17 +108,21 @@ protected:
 
 	std::string m_cachePath;
 
+	std::string m_physCachePath;
+
 public:
 	ResourceCacheDevice(std::shared_ptr<ResourceCache> cache, bool blocking);
 
-	ResourceCacheDevice(std::shared_ptr<ResourceCache> cache, bool blocking, const std::string& cachePath);
+	ResourceCacheDevice(std::shared_ptr<ResourceCache> cache, bool blocking, const std::string& cachePath, const std::string& physCachePath);
 
 protected:
-	boost::optional<ResourceCacheEntryList::Entry> GetEntryForFileName(const std::string& fileName);
+	std::optional<ResourceCacheEntryList::Entry> GetEntryForFileName(const std::string& fileName);
 
 	HandleData* AllocateHandle(THandle* idx);
 
 	THandle OpenInternal(const std::string& fileName, uint64_t* bulkPtr);
+
+	void EnsureDeferredOpen(THandle handle, HandleData* handleData);
 
 	bool EnsureFetched(HandleData* handleData);
 

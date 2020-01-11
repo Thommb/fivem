@@ -13,6 +13,7 @@
 #include <MumbleClientImpl.h>
 #include <MumbleClientState.h>
 #include <mmsystem.h>
+#include <CoreConsole.h>
 
 #include <xaudio2fx.h>
 
@@ -174,23 +175,38 @@ public:
 	}
 };
 
+static std::shared_ptr<ConVar<bool>> g_use3dAudio;
+static std::shared_ptr<ConVar<bool>> g_useSendingRangeOnly;
 
 void MumbleAudioOutput::Initialize()
 {
+	g_use3dAudio = std::make_shared<ConVar<bool>>("voice_use3dAudio", ConVar_None, false);
+	g_useSendingRangeOnly = std::make_shared<ConVar<bool>>("voice_useSendingRangeOnly", ConVar_None, false);
+
 	m_initialized = false;
 	m_distance = FLT_MAX;
 	m_volume = 1.0f;
 	m_masteringVoice = nullptr;
 	m_submixVoice = nullptr;
-	m_thread = std::thread([this] { ThreadFunc(); });
+	m_thread = std::thread([this]
+	{
+		ThreadFunc();
+
+		// COM FLS cleanup will fail on thread exit and crash in an unloaded XAudio DLL, so instead we opt to spin
+		while (true)
+		{
+			std::this_thread::sleep_for(std::chrono::seconds(60));
+		}
+	});
 }
 
 MumbleAudioOutput::ClientAudioState::ClientAudioState()
-	: volume(1.0f), sequence(0), voice(nullptr), opus(nullptr), isTalking(false), isAudible(true)
+	: volume(1.0f), sequence(0), voice(nullptr), opus(nullptr), isTalking(false), isAudible(true), overrideVolume(-1.0f)
 {
 	position[0] = 0.0f;
 	position[1] = 0.0f;
 	position[2] = 0.0f;
+	distance = 0.0f;
 
 	lastTime = timeGetTime();
 }
@@ -272,6 +288,9 @@ void MumbleAudioOutput::HandleClientConnect(const MumbleUser& user)
 
 	voice->Start();
 
+	// disable volume initially, we will only set it once we get position data from the client
+	voice->SetVolume(0.0f);
+
 	state->voice = voice;
 
 	int error;
@@ -301,6 +320,22 @@ void MumbleAudioOutput::HandleClientVoiceData(const MumbleUser& user, uint64_t s
 
 	if (len >= 0)
 	{
+		// work around XA2.7 issue (for Win7) where >64 buffers being enqueued are a fatal error (leading to __debugbreak)
+		// "SimpList: non-growable list ran out of room for new elements"
+
+		XAUDIO2_VOICE_STATE vs;
+		client->voice->GetState(&vs);
+
+		if (vs.BuffersQueued > 48)
+		{
+			// return, waiting for buffers to play back
+			// flushing buffers would be helpful, but would lead to memory leaks
+			// (and wouldn't be instant, either)
+			_aligned_free(voiceBuffer);
+
+			return;
+		}
+
 		XAUDIO2_BUFFER bufferData;
 		bufferData.LoopBegin = 0;
 		bufferData.LoopCount = 0;
@@ -318,7 +353,7 @@ void MumbleAudioOutput::HandleClientVoiceData(const MumbleUser& user, uint64_t s
 	}
 	else
 	{
-		delete[] voiceBuffer;
+		_aligned_free(voiceBuffer);
 	}
 }
 
@@ -329,6 +364,26 @@ static const X3DAUDIO_DISTANCE_CURVE_POINT Emitter_Reverb_CurvePoints[3] = { 0.0
 static const X3DAUDIO_DISTANCE_CURVE       Emitter_Reverb_Curve = { (X3DAUDIO_DISTANCE_CURVE_POINT*)&Emitter_Reverb_CurvePoints[0], 3 };
 
 static const X3DAUDIO_CONE Listener_DirectionalCone = { X3DAUDIO_PI*5.0f / 6.0f, X3DAUDIO_PI*11.0f / 6.0f, 1.0f, 0.75f, 0.0f, 0.25f, 0.708f, 1.0f };
+
+void MumbleAudioOutput::HandleClientDistance(const MumbleUser& user, float distance)
+{
+	auto client = m_clients[user.GetSessionId()];
+
+	if (client)
+	{
+		client->distance = distance;
+	}
+}
+
+void MumbleAudioOutput::HandleClientVolumeOverride(const MumbleUser& user, float volumeOverride)
+{
+	auto client = m_clients[user.GetSessionId()];
+
+	if (client)
+	{
+		client->overrideVolume = volumeOverride;
+	}
+}
 
 void MumbleAudioOutput::HandleClientPosition(const MumbleUser& user, float position[3])
 {
@@ -344,97 +399,170 @@ void MumbleAudioOutput::HandleClientPosition(const MumbleUser& user, float posit
 		client->position[1] = position[1];
 		client->position[2] = position[2];
 
-		if ((position[0] != 0.0f || position[1] != 0.0f || position[2] != 0.0f) && m_x3daCalculate)
+		if ((position[0] != 0.0f || position[1] != 0.0f || position[2] != 0.0f))
 		{
-			X3DAUDIO_EMITTER emitter = { 0 };
+			float distance = 0.0f;
 
-			if (lastPosition.x != 0.0f || lastPosition.y != 0.0f || lastPosition.z != 0.0f)
+			if (abs(m_distance) >= 0.01f && abs(client->distance) >= 0.01f)
 			{
-				auto curPosition = DirectX::XMFLOAT3(client->position);
+				distance = std::min(m_distance, client->distance);
+			}
+			else if (abs(m_distance) >= 0.01f)
+			{
+				distance = m_distance;
+			}
+			else if (abs(client->distance) >= 0.01f)
+			{
+				distance = client->distance;
+			}
 
-				auto v1 = DirectX::XMLoadFloat3(&curPosition);
-				auto v2 = DirectX::XMVectorSet(lastPosition.x, lastPosition.y, lastPosition.z, 0.f);
+			// override with the transmitter's range if this is configured like that
+			if (g_useSendingRangeOnly->GetValue())
+			{
+				distance = 0.0f;
 
-				auto dT = (client->lastTime - timeGetTime());
-
-				if (dT > 0)
+				if (abs(client->distance) >= 0.01f)
 				{
-					auto eVelocity = (v1 - v2) / (dT / 1000.0f);
+					distance = client->distance;
+				}
+			}
 
-					XMFLOAT3 tmp;
-					XMStoreFloat3(&tmp, eVelocity);
-					emitter.Velocity.x = tmp.x;
-					emitter.Velocity.y = tmp.y;
-					emitter.Velocity.z = tmp.z;
+			if (g_use3dAudio->GetValue() && m_x3daCalculate && client->overrideVolume < 0.f && distance > 0.0f)
+			{
+				X3DAUDIO_EMITTER emitter = { 0 };
+
+				if (lastPosition.x != 0.0f || lastPosition.y != 0.0f || lastPosition.z != 0.0f)
+				{
+					auto curPosition = DirectX::XMFLOAT3(client->position);
+
+					auto v1 = DirectX::XMLoadFloat3(&curPosition);
+					auto v2 = DirectX::XMVectorSet(lastPosition.x, lastPosition.y, lastPosition.z, 0.f);
+
+					auto dT = (client->lastTime - timeGetTime());
+
+					if (dT > 0)
+					{
+						auto eVelocity = (v1 - v2) / (dT / 1000.0f);
+
+						XMFLOAT3 tmp;
+						XMStoreFloat3(&tmp, eVelocity);
+						emitter.Velocity.x = tmp.x;
+						emitter.Velocity.y = tmp.y;
+						emitter.Velocity.z = tmp.z;
+					}
+
+					client->lastTime = timeGetTime();
 				}
 
-				client->lastTime = timeGetTime();
+				emitter.Velocity = XMFLOAT3(0.0f, 0.0f, 0.0f);
+
+				float coeffs[2] = { 0 };
+
+				X3DAUDIO_DSP_SETTINGS dsp = { 0 };
+				dsp.SrcChannelCount = 1;
+				dsp.DstChannelCount = 2;
+				dsp.pMatrixCoefficients = coeffs;
+
+				static const X3DAUDIO_DISTANCE_CURVE_POINT _curvePoints[3] = { 0.0f, 1.0f, 0.25f, 1.0f, 1.0f, 0.0f };
+				static const X3DAUDIO_DISTANCE_CURVE       _curve = { (X3DAUDIO_DISTANCE_CURVE_POINT*)&_curvePoints[0], 3 };
+
+				emitter.OrientFront = DirectX::XMFLOAT3(0.0f, 0.0f, 1.0f);
+				emitter.OrientTop = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f);
+				emitter.Position = DirectX::XMFLOAT3(position);
+				emitter.ChannelCount = 1;
+				emitter.pVolumeCurve = const_cast<X3DAUDIO_DISTANCE_CURVE*>(&_curve);
+				emitter.CurveDistanceScaler = distance;
+
+				emitter.InnerRadius = 2.0f;
+				emitter.InnerRadiusAngle = X3DAUDIO_PI / 4.0f;
+
+				emitter.pLFECurve = (X3DAUDIO_DISTANCE_CURVE*)&Emitter_LFE_Curve;
+				emitter.pLPFDirectCurve = nullptr; // use default curve
+				emitter.pLPFReverbCurve = nullptr; // use default curve
+				emitter.pReverbCurve = (X3DAUDIO_DISTANCE_CURVE*)&Emitter_Reverb_Curve;
+				emitter.DopplerScaler = 1.0f;
+
+				m_x3daCalculate(m_x3da, &m_listener, &emitter, X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_DOPPLER
+					| X3DAUDIO_CALCULATE_LPF_DIRECT | X3DAUDIO_CALCULATE_LPF_REVERB
+					| X3DAUDIO_CALCULATE_REVERB, &dsp);
+
+				if (!isnan(dsp.DopplerFactor))
+				{
+					client->voice->SetFrequencyRatio(dsp.DopplerFactor);
+				}
+
+				// reset the volume in case we were in 2d mode
+				client->voice->SetVolume(1.0f);
+
+				client->voice->SetOutputMatrix(m_masteringVoice, 1, 2, dsp.pMatrixCoefficients);
+
+				if (m_submixVoice)
+				{
+					client->voice->SetOutputMatrix(m_submixVoice, 1, 1, &dsp.ReverbLevel);
+				}
+
+				//XAUDIO2_FILTER_PARAMETERS FilterParametersDirect = { LowPassFilter, 2.0f * sinf(X3DAUDIO_PI / 6.0f * dsp.LPFDirectCoefficient), 1.0f };
+				//client->voice->SetOutputFilterParameters(m_masteringVoice, &FilterParametersDirect);
+				//XAUDIO2_FILTER_PARAMETERS FilterParametersReverb = { LowPassFilter, 2.0f * sinf(X3DAUDIO_PI / 6.0f * dsp.LPFReverbCoefficient), 1.0f };
+				//client->voice->SetOutputFilterParameters(m_submixVoice, &FilterParametersReverb);
+
+				client->isAudible = (dsp.pMatrixCoefficients[0] > 0.1f || dsp.pMatrixCoefficients[1] > 0.1f);
 			}
-
-			float coeffs[2] = { 0 };
-
-			X3DAUDIO_DSP_SETTINGS dsp = { 0 };
-			dsp.SrcChannelCount = 1;
-			dsp.DstChannelCount = 2;
-			dsp.pMatrixCoefficients = coeffs;
-
-			emitter.OrientFront = DirectX::XMFLOAT3(0.0f, 0.0f, 1.0f);
-			emitter.OrientTop = DirectX::XMFLOAT3(0.0f, 1.0f, 0.0f);
-			emitter.Position = DirectX::XMFLOAT3(position);
-			emitter.ChannelCount = 1;
-			emitter.pVolumeCurve = const_cast<X3DAUDIO_DISTANCE_CURVE*>(&X3DAudioDefault_LinearCurve);
-			emitter.CurveDistanceScaler = m_distance;
-
-			emitter.InnerRadius = 2.0f;
-			emitter.InnerRadiusAngle = X3DAUDIO_PI / 4.0f;
-
-			emitter.pLFECurve = (X3DAUDIO_DISTANCE_CURVE*)&Emitter_LFE_Curve;
-			emitter.pLPFDirectCurve = nullptr; // use default curve
-			emitter.pLPFReverbCurve = nullptr; // use default curve
-			emitter.pReverbCurve = (X3DAUDIO_DISTANCE_CURVE*)&Emitter_Reverb_Curve;
-			emitter.DopplerScaler = 1.0f;
-
-			m_x3daCalculate(m_x3da, &m_listener, &emitter, X3DAUDIO_CALCULATE_MATRIX | X3DAUDIO_CALCULATE_DOPPLER
-				| X3DAUDIO_CALCULATE_LPF_DIRECT | X3DAUDIO_CALCULATE_LPF_REVERB
-				| X3DAUDIO_CALCULATE_REVERB, &dsp);
-
-			if (!isnan(dsp.DopplerFactor))
+			else
 			{
-				client->voice->SetFrequencyRatio(dsp.DopplerFactor);
+				auto emitterPos = DirectX::XMVectorSet(position[0], position[1], position[2], 0.0f);
+				auto listenerPos = DirectX::XMVectorSet(m_listener.Position.x, m_listener.Position.y, m_listener.Position.z, 0.0f);
+
+				bool shouldHear = (abs(distance) < 0.01f) ? true : (DirectX::XMVectorGetX(DirectX::XMVector3LengthSq(emitterPos - listenerPos)) < (distance * distance));
+
+				if (client->overrideVolume >= 0.0f)
+				{
+					client->voice->SetVolume(client->overrideVolume);
+
+					shouldHear = client->overrideVolume >= 0.005f;
+				}
+				else
+				{
+					client->voice->SetVolume(shouldHear ? 1.0f : 0.0f);
+				}
+
+				// reset the output matrix in case we were in 3d mode
+				float monoAllSpeakers[] = {
+					1.0f, 1.0f
+				};
+
+				client->voice->SetOutputMatrix(m_masteringVoice, 1, 2, monoAllSpeakers);
+
+				client->isAudible = shouldHear;
 			}
-
-			client->voice->SetOutputMatrix(m_masteringVoice, 1, 2, dsp.pMatrixCoefficients);
-
-			if (m_submixVoice)
-			{
-				client->voice->SetOutputMatrix(m_submixVoice, 1, 1, &dsp.ReverbLevel);
-			}
-
-			//XAUDIO2_FILTER_PARAMETERS FilterParametersDirect = { LowPassFilter, 2.0f * sinf(X3DAUDIO_PI / 6.0f * dsp.LPFDirectCoefficient), 1.0f };
-			//client->voice->SetOutputFilterParameters(m_masteringVoice, &FilterParametersDirect);
-			//XAUDIO2_FILTER_PARAMETERS FilterParametersReverb = { LowPassFilter, 2.0f * sinf(X3DAUDIO_PI / 6.0f * dsp.LPFReverbCoefficient), 1.0f };
-			//client->voice->SetOutputFilterParameters(m_submixVoice, &FilterParametersReverb);
-
-			client->isAudible = (dsp.pMatrixCoefficients[0] > 0.1f || dsp.pMatrixCoefficients[1] > 0.1f);
 		}
 		else
 		{
-			// reset matrix
-			float matrix[2] = { 1.f, 1.f };
-			client->voice->SetOutputMatrix(m_masteringVoice, 1, 2, matrix);
-
-			// disable submix voice
-			matrix[0] = 0.0f;
-
-			if (m_submixVoice)
+			if (g_use3dAudio->GetValue())
 			{
-				client->voice->SetOutputMatrix(m_submixVoice, 1, 1, matrix);
+				// reset matrix (to inaudible)
+				float matrix[2] = { 0.f, 0.f };
+				client->voice->SetOutputMatrix(m_masteringVoice, 1, 2, matrix);
+
+				// disable submix voice
+				matrix[0] = 0.0f;
+
+				if (m_submixVoice)
+				{
+					client->voice->SetOutputMatrix(m_submixVoice, 1, 1, matrix);
+				}
+
+				// reset frequency ratio
+				client->voice->SetFrequencyRatio(1.0f);
+
+				client->isAudible = false;
 			}
-
-			// reset frequency ratio
-			client->voice->SetFrequencyRatio(1.0f);
-
-			client->isAudible = true;
+			else
+			{
+				// we don't want to hear data-less clients at this time
+				client->isAudible = false;
+				client->voice->SetVolume(0.0f);
+			}
 		}
 	}
 }
@@ -472,6 +600,8 @@ void MumbleAudioOutput::SetMatrix(float position[3], float front[3], float up[3]
 		}
 	}
 
+	m_listener.Velocity = XMFLOAT3(0.0f, 0.0f, 0.0f);
+
 	m_listener.Position = DirectX::XMFLOAT3(position);
 }
 
@@ -502,6 +632,11 @@ void MumbleAudioOutput::ThreadFunc()
 {
 	SetThreadName(-1, "[Mumble] Audio Output Thread");
 
+	HANDLE mmcssHandle;
+	DWORD mmcssTaskIndex;
+
+	mmcssHandle = AvSetMmThreadCharacteristics(L"Audio", &mmcssTaskIndex);
+
 	// initialize COM for the current thread
 	CoInitialize(nullptr);
 
@@ -509,6 +644,7 @@ void MumbleAudioOutput::ThreadFunc()
 
 	if (FAILED(hr))
 	{
+		trace("%s: failed MMDeviceEnumerator\n", __func__);
 		return;
 	}
 
@@ -586,7 +722,7 @@ static bool SafeCallX3DA(decltype(&X3DAudioInitialize) func, UINT32 SpeakerChann
 
 WRL::ComPtr<IMMDevice> GetMMDeviceFromGUID(bool input, const std::string& guid);
 
-DEFINE_GUID(CLSID_AudioReverb, 0x6a93130e, 0x1d53, 0x41d1, 0xa9, 0xcf, 0xe7, 0x58, 0x80, 0x0b, 0xb1, 0x79);
+void DuckingOptOut(WRL::ComPtr<IMMDevice> device);
 
 void MumbleAudioOutput::InitializeAudioDevice()
 {
@@ -601,8 +737,12 @@ void MumbleAudioOutput::InitializeAudioDevice()
 	{
 		if (FAILED(m_mmDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eCommunications, device.ReleaseAndGetAddressOf())))
 		{
+			trace("%s: failed GetDefaultAudioEndpoint\n", __func__);
 			return;
 		}
+
+		// opt out of ducking
+		DuckingOptOut(device);
 	}
 	else
 	{
@@ -610,6 +750,7 @@ void MumbleAudioOutput::InitializeAudioDevice()
 
 		if (!device.Get())
 		{
+			trace("%s: failed GetMMDeviceFromGUID\n", __func__);
 			return;
 		}
 	}
@@ -623,6 +764,7 @@ void MumbleAudioOutput::InitializeAudioDevice()
 
 		if (FAILED(_XAudio2Create(m_xa2.ReleaseAndGetAddressOf(), 0, 1)))
 		{
+			trace("%s: failed XA2.8 create\n", __func__);
 			return;
 		}
 
@@ -640,7 +782,7 @@ void MumbleAudioOutput::InitializeAudioDevice()
 
 		m_xa2 = WRL::Make<XAudio2DownlevelWrap>();
 
-		_CreateAudioReverb = [](IUnknown** ppApo)
+		_CreateAudioReverb = [](IUnknown** ppApo) -> HRESULT
 		{
 			return CoCreateInstance(CLSID_AudioReverb,
 				NULL, CLSCTX_INPROC_SERVER, IID_IUnknown, (void**)ppApo);
@@ -668,6 +810,7 @@ void MumbleAudioOutput::InitializeAudioDevice()
 
 	if (FAILED(m_xa2->CreateMasteringVoice(&m_masteringVoice, 2, 48000, 0, deviceIdStr.c_str())))
 	{
+		trace("%s: failed CreateMasteringVoice\n", __func__);
 		return;
 	}
 
